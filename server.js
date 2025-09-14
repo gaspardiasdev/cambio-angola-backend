@@ -1,3 +1,4 @@
+/* eslint-disable no-irregular-whitespace */
 /* eslint-disable no-unused-vars */
 const express = require("express");
 const cors = require("cors");
@@ -31,8 +32,70 @@ const limiter = rateLimit({
 
 // Middleware
 app.use(limiter);
-app.use(cors());
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL,
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1:3000',
+      'http://localhost:4173'
+    ].filter(Boolean);
+
+    // Permitir requests sem origin (Postman, apps mobile)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log('⚠️  CORS bloqueou origem:', origin);
+      callback(null, true); // Temporariamente permitir para debug
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin'
+  ],
+  exposedHeaders: ['X-Updated-Token']
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
+
+app.use((req, res, next) => {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    if (req.headers.origin) {
+      console.log('Origin:', req.headers.origin);
+    }
+  }
+  next();
+});
+
+const helmet = require("helmet");
+const compression = require("compression");
+const morgan = require("morgan");
+
+// ===== 1. CONFIGURAÇÃO DE SEGURANÇA =====
+if (process.env.NODE_ENV === 'production') {
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false // Desabilitar temporariamente para APIs
+  }));
+  app.use(compression());
+  app.use(morgan('combined'));
+  app.set('trust proxy', 1);
+} else {
+  app.use(morgan('dev'));
+}
+
+
 
 // Dados de câmbio com oscilação realista
 const generateRatesData = () => {
@@ -77,18 +140,197 @@ const generateRatesData = () => {
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_here";
 
 // MongoDB Connection
+// MongoDB Connection with better error handling and retry logic
 const connectDB = async () => {
-  try {
-    await mongoose.connect(
-      process.env.MONGODB_URI || "mongodb://localhost:27017/cambio-app"
-    );
-    console.log("✅ MongoDB conectado com sucesso!");
-    await initializeDatabase();
-  } catch (error) {
-    console.error("❌ Erro na conexão MongoDB:", error);
-    process.exit(1);
+  const maxRetries = 5;
+  let retries = 0;
+  
+  const connectionOptions = {
+    serverSelectionTimeoutMS: 10000, // 10 seconds timeout
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+    retryWrites: true,
+    w: 'majority'
+  };
+
+  while (retries < maxRetries) {
+    try {
+      console.log(`🔄 Tentativa de conexão MongoDB ${retries + 1}/${maxRetries}...`);
+      
+      await mongoose.connect(
+        process.env.MONGODB_URI || "mongodb://localhost:27017/cambio-app",
+        connectionOptions
+      );
+      
+      console.log("✅ MongoDB conectado com sucesso!");
+      await initializeDatabase();
+      return;
+      
+    } catch (error) {
+      retries++;
+      console.error(`❌ Erro na conexão MongoDB (tentativa ${retries}/${maxRetries}):`, error.message);
+      
+      if (retries >= maxRetries) {
+        console.error("❌ Máximo de tentativas de conexão excedido");
+        
+        // Em produção, você pode querer continuar sem MongoDB ou usar fallback
+        if (process.env.NODE_ENV === 'production') {
+          console.log("⚠️ Servidor iniciará sem conexão MongoDB - funcionalidade limitada");
+          return;
+        } else {
+          process.exit(1);
+        }
+      }
+      
+      // Wait before retry (exponential backoff)
+      const waitTime = Math.min(1000 * Math.pow(2, retries - 1), 10000);
+      console.log(`⏳ Aguardando ${waitTime}ms antes da próxima tentativa...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
   }
 };
+
+// Enhanced MongoDB event listeners
+mongoose.connection.on('connected', () => {
+  console.log('📊 MongoDB: Conexão estabelecida');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ MongoDB: Erro na conexão:', err.message);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️ MongoDB: Conexão perdida');
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('🔄 MongoDB: Reconectado');
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Recebido sinal de interrupção. Fechando servidor...');
+  
+  try {
+    await mongoose.connection.close();
+    console.log('✅ Conexão MongoDB fechada');
+  } catch (error) {
+    console.error('❌ Erro ao fechar conexão MongoDB:', error);
+  }
+  
+  process.exit(0);
+});
+
+// Enhanced cron job with better error handling
+cron.schedule("* * * * *", async () => {
+  try {
+    // Check if MongoDB is connected before proceeding
+    if (mongoose.connection.readyState !== 1) {
+      console.log("⚠️ MongoDB desconectado. Pulando verificação de alertas.");
+      return;
+    }
+
+    const latestRates = await Rate.findOne().sort({ date: -1 });
+    if (!latestRates) return;
+
+    const pendingAlerts = await Alert.find({ isTriggered: false }).populate("userId");
+    let alertsTriggered = 0;
+
+    for (const alert of pendingAlerts) {
+      if (!alert.userId) continue;
+
+      const rateKey = `${alert.currency}${
+        alert.rateType === "buy" ? "Buy" : "Sell"
+      }`;
+      const currentRate = latestRates[rateKey];
+
+      if (!currentRate) continue;
+
+      let shouldTrigger = false;
+      if (alert.type === "above" && currentRate >= alert.value) {
+        shouldTrigger = true;
+      } else if (alert.type === "below" && currentRate <= alert.value) {
+        shouldTrigger = true;
+      }
+
+      if (shouldTrigger) {
+        try {
+          await sendEmailNotification(alert, currentRate, alert.userId);
+          alert.isTriggered = true;
+          alert.triggeredAt = new Date();
+          alert.triggeredRate = currentRate;
+          await alert.save();
+          alertsTriggered++;
+        } catch (emailError) {
+          console.error(`❌ Erro ao enviar alerta para ${alert.userId.email}:`, emailError.message);
+        }
+      }
+    }
+
+    if (alertsTriggered > 0) {
+      console.log(`✅ Alertas disparados: ${alertsTriggered}`);
+    }
+  } catch (error) {
+    console.error("❌ Erro na verificação de alertas:", error.message);
+    // Don't exit the process, just log the error
+  }
+});
+
+// Enhanced health check with MongoDB status
+app.get(["/", "/api/health", "/health"], async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState;
+    const dbConnected = dbStatus === 1;
+    
+    let ratesCount = 0;
+    let usersCount = 0;
+    let alertsCount = 0;
+    
+    if (dbConnected) {
+      try {
+        ratesCount = await Rate.countDocuments();
+        usersCount = await User.countDocuments();
+        alertsCount = await Alert.countDocuments();
+      } catch (error) {
+        console.error('Erro ao buscar estatísticas:', error.message);
+      }
+    }
+
+    const health = {
+      status: dbConnected ? "OK" : "DEGRADED",
+      timestamp: new Date().toISOString(),
+      version: "2.0.0",
+      environment: process.env.NODE_ENV || 'development',
+      port: process.env.PORT || 5000,
+      database: {
+        connected: dbConnected,
+        status: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbStatus] || 'unknown',
+        host: process.env.MONGODB_URI ? new URL(process.env.MONGODB_URI).hostname : 'localhost'
+      },
+      data: {
+        ratesCount,
+        usersCount,
+        alertsCount,
+        hasData: ratesCount > 0
+      },
+      uptime: Math.floor(process.uptime()),
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+      }
+    };
+
+    const statusCode = health.status === "OK" ? 200 : 503;
+    res.status(statusCode).json(health);
+  } catch (error) {
+    console.error("Erro no health check:", error);
+    res.status(503).json({
+      status: "ERROR",
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 
 // Initialize Database
 const initializeDatabase = async () => {
@@ -251,7 +493,7 @@ app.post("/api/auth/login", async (req, res) => {
 
 // === ROTAS DE TAXAS ===
 // No server.js, adicionar cache simples:
-let ratesCache = {
+const ratesCache = {
   data: null,
   timestamp: 0,
   ttl: 60000, // 1 minuto
@@ -383,6 +625,71 @@ app.get("/api/rates/stats", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("Erro ao calcular estatísticas:", error);
     res.status(500).json({ message: "Erro ao calcular estatísticas" });
+  }
+});
+
+// Adicione este endpoint temporário para criar/verificar admin
+app.post("/api/admin/create", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email e senha obrigatórios" });
+    }
+
+    // Verifica se já existe
+    const existingAdmin = await User.findOne({ email });
+    if (existingAdmin) {
+      return res.json({ 
+        message: "Admin já existe", 
+        email: existingAdmin.email,
+        isPremium: existingAdmin.isPremium,
+        isAdmin: existingAdmin.isAdmin
+      });
+    }
+
+    // Cria novo admin
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newAdmin = new User({
+      email,
+      password: hashedPassword,
+      isAdmin: true,
+      isPremium: true,
+      dateCreated: new Date()
+    });
+
+    await newAdmin.save();
+    
+    console.log("✅ Novo admin criado:", email);
+    
+    res.status(201).json({
+      message: "Admin criado com sucesso",
+      email: newAdmin.email,
+      isAdmin: newAdmin.isAdmin,
+      isPremium: newAdmin.isPremium
+    });
+
+  } catch (error) {
+    console.error("Erro ao criar admin:", error);
+    res.status(500).json({ message: "Erro interno" });
+  }
+});
+
+// Endpoint para listar todos os utilizadores (debug)
+app.get("/api/debug/users", async (req, res) => {
+  try {
+    const users = await User.find().select("-password");
+    res.json({
+      total: users.length,
+      users: users.map(u => ({
+        email: u.email,
+        isAdmin: u.isAdmin,
+        isPremium: u.isPremium,
+        dateCreated: u.dateCreated
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1128,23 +1435,78 @@ cron.schedule("0 9 * * *", async () => {
 });
 
 // Health check
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    version: "2.0.0",
-  });
+app.get(["/", "/api/health", "/health"], async (req, res) => {
+  try {
+    const dbStatus = mongoose.connection.readyState;
+    const dbConnected = dbStatus === 1;
+    
+    let ratesCount = 0;
+    if (dbConnected) {
+      try {
+        ratesCount = await Rate.countDocuments();
+      } catch (error) {
+        console.error('Erro ao contar rates:', error);
+      }
+    }
+
+    const health = {
+      status: dbConnected ? "OK" : "ERROR", 
+      timestamp: new Date().toISOString(),
+      version: "2.0.0",
+      environment: process.env.NODE_ENV || 'development',
+      port: process.env.PORT || 5000,
+      database: {
+        connected: dbConnected,
+        status: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbStatus] || 'unknown'
+      },
+      data: {
+        ratesCount,
+        hasData: ratesCount > 0
+      },
+      uptime: Math.floor(process.uptime())
+    };
+
+    const statusCode = health.status === "OK" ? 200 : 503;
+    res.status(statusCode).json(health);
+  } catch (error) {
+    console.error("Erro no health check:", error);
+    res.status(503).json({
+      status: "ERROR",
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error("Erro não tratado:", err);
-  res.status(500).json({ message: "Erro interno do servidor" });
+  console.error('Erro não tratado:', err);
+  
+  // Não expor detalhes do erro em produção
+  if (process.env.NODE_ENV === 'production') {
+    res.status(500).json({ 
+      message: "Erro interno do servidor",
+      timestamp: new Date().toISOString()
+    });
+  } else {
+    res.status(500).json({ 
+      message: "Erro interno do servidor",
+      error: err.message,
+      stack: err.stack,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
-// 404 handler
+// 404 handler melhorado
 app.use((req, res) => {
-  res.status(404).json({ message: "Endpoint não encontrado" });
+  console.log(`404 - Endpoint não encontrado: ${req.method} ${req.path}`);
+  res.status(404).json({ 
+    message: "Endpoint não encontrado",
+    path: req.path,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Rate limiting específico por utilizador autenticado:

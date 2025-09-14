@@ -21,7 +21,8 @@
     "pm2:restart": "pm2 restart cambio-angola",
     "pm2:logs": "pm2 logs cambio-angola",
     "docker:build": "docker build -t cambio-angola .",
-    "docker:run": "docker run -p 5000:5000 --env-file .env cambio-angola"
+    "docker:run": "docker run -p 5000:5000 --env-file .env cambio-angola",
+    "build": "echo 'No build step required'"
   },
   "keywords": [
     "cambio",
@@ -33,34 +34,34 @@
     "jwt",
     "alerts"
   ],
-  "author": "Sidia Salpha <sidiasalpha2k24@gmail.com>",
+  "author": "SidiaS alpha <sidiasalpha2k24@gmail.com>",
   "license": "MIT",
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "mongoose": "^8.0.0",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "compression": "^1.7.4",
-    "express-rate-limit": "^7.1.5",
-    "nodemailer": "^6.9.7",
-    "node-cron": "^3.0.3",
+    "dotenv": "^16.3.1",
     "exceljs": "^4.4.0",
-    "morgan": "^1.10.0",
-    "dotenv": "^16.3.1"
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.0.0",
+    "morgan": "^1.10.1",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.7"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
-    "jest": "^29.7.0",
-    "supertest": "^6.3.3",
     "eslint": "^8.53.0",
     "eslint-config-node": "^4.1.0",
-    "mongodb-memory-server": "^9.0.1"
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^9.0.1",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
   },
   "jest": {
     "testEnvironment": "node",
@@ -100,10 +101,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/seuusuario/cambio-angola-backend.git"
+    "url": "https://github.com/gaspardiasdev/cambio-angola-backend.git"
   },
   "bugs": {
-    "url": "https://github.com/seuusuario/cambio-angola-backend/issues"
+    "url": "https://github.com/gaspardiasdev/cambio-angola-backend/issues"
   },
   "homepage": "https://cambio-angola.com"
 }
