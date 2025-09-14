@@ -10,6 +10,31 @@ const rateLimit = require("express-rate-limit");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
+// Add this after require("dotenv").config(); and before your models
+console.log('🔍 Validando variáveis de ambiente...');
+
+const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+  console.error('❌ Variáveis de ambiente em falta:', missingEnvVars);
+  if (process.env.NODE_ENV === 'production') {
+    console.log('⚠️ Usando valores padrão para variáveis em falta...');
+  }
+}
+
+// Set defaults for missing variables
+if (!process.env.JWT_SECRET) {
+  process.env.JWT_SECRET = 'your_super_secret_key_here_change_in_production';
+  console.log('⚠️ Usando JWT_SECRET padrão - ALTERE em produção!');
+}
+
+console.log('📋 Configuração do ambiente:');
+console.log('- NODE_ENV:', process.env.NODE_ENV || 'development');
+console.log('- PORT:', process.env.PORT || 5000);
+console.log('- MONGODB_URI:', process.env.MONGODB_URI ? '✅ Definido' : '❌ Não definido');
+console.log('- JWT_SECRET:', process.env.JWT_SECRET ? '✅ Definido' : '❌ Não definido');
+
 // Models
 const User = require("./models/userModel");
 const Rate = require("./models/rateModel");
@@ -133,27 +158,31 @@ const generateRatesData = () => {
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_here";
 
 // MongoDB Connection
-// MongoDB Connection with better error handling and retry logic
+// Also update your connectDB function to be more robust:
 const connectDB = async () => {
-  const maxRetries = 5;
+  const maxRetries = 3; // Reduce retries for faster deployment
   let retries = 0;
   
   const connectionOptions = {
-    serverSelectionTimeoutMS: 10000, // 10 seconds timeout
+    serverSelectionTimeoutMS: 5000, // Reduce timeout
     socketTimeoutMS: 45000,
     maxPoolSize: 10,
     retryWrites: true,
-    w: 'majority'
+    w: 'majority',
+    maxIdleTimeMS: 30000,
+    bufferCommands: false, // Important for production
   };
 
   while (retries < maxRetries) {
     try {
       console.log(`🔄 Tentativa de conexão MongoDB ${retries + 1}/${maxRetries}...`);
       
-      await mongoose.connect(
-        process.env.MONGODB_URI || "mongodb://localhost:27017/cambio-app",
-        connectionOptions
-      );
+      const mongoUri = process.env.MONGODB_URI;
+      if (!mongoUri) {
+        throw new Error('MONGODB_URI não definida nas variáveis de ambiente');
+      }
+      
+      await mongoose.connect(mongoUri, connectionOptions);
       
       console.log("✅ MongoDB conectado com sucesso!");
       await initializeDatabase();
@@ -166,17 +195,16 @@ const connectDB = async () => {
       if (retries >= maxRetries) {
         console.error("❌ Máximo de tentativas de conexão excedido");
         
-        // Em produção, você pode querer continuar sem MongoDB ou usar fallback
         if (process.env.NODE_ENV === 'production') {
-          console.log("⚠️ Servidor iniciará sem conexão MongoDB - funcionalidade limitada");
-          return;
+          console.log("⚠️ Servidor continuará sem MongoDB - funcionalidade limitada");
+          return; // Don't throw in production
         } else {
-          process.exit(1);
+          throw error; // Throw in development
         }
       }
       
-      // Wait before retry (exponential backoff)
-      const waitTime = Math.min(1000 * Math.pow(2, retries - 1), 10000);
+      // Wait before retry
+      const waitTime = Math.min(1000 * retries, 3000);
       console.log(`⏳ Aguardando ${waitTime}ms antes da próxima tentativa...`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
@@ -1495,19 +1523,51 @@ app.use("/api/alerts", validatePremiumStatus);
 app.use("/api/export-rates", validatePremiumStatus);
 
 // Iniciar servidor
+// Replace your startServer function with this:
 const startServer = async () => {
-  await connectDB();
-
-  app.listen(PORT, () => {
-    console.log(`
+  try {
+    console.log('🚀 Iniciando servidor...');
+    
+    // First, try to connect to MongoDB
+    await connectDB();
+    
+    // Only start the HTTP server after successful DB connection OR in production mode
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`
 🚀 ====================================
-   Servidor Cambio Angola iniciado!
-🌐 URL: http://localhost:${PORT}
+   Servidor Cambio Angola iniciado!
+🌍 URL: http://localhost:${PORT}
 📊 Ambiente: ${process.env.NODE_ENV || "development"}
 ⏰ Horário: ${new Date().toLocaleString("pt-PT")}
+📊 MongoDB: ${mongoose.connection.readyState === 1 ? 'Conectado' : 'Desconectado'}
 ====================================
-    `);
-  });
+    `);
+    });
+
+    // Handle server errors
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Porta ${PORT} já está em uso`);
+      } else {
+        console.error('❌ Erro no servidor:', error);
+      }
+      process.exit(1);
+    });
+
+  } catch (error) {
+    console.error('❌ Falha ao iniciar servidor:', error);
+    
+    // In production, still try to start the server even if DB fails
+    if (process.env.NODE_ENV === 'production') {
+      console.log('⚠️ Iniciando servidor sem MongoDB em modo de emergência...');
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🆘 Servidor iniciado em modo de emergência na porta ${PORT}`);
+      });
+    } else {
+      process.exit(1);
+    }
+  }
 };
+
 
 startServer().catch(console.error);
