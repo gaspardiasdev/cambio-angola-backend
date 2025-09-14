@@ -36,31 +36,24 @@ const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       process.env.FRONTEND_URL,
+      'https://seu-frontend.netlify.app',
+      'https://seu-frontend.vercel.app',
       'http://localhost:3000',
       'http://localhost:5173',
-      'http://127.0.0.1:3000',
-      'http://localhost:4173'
     ].filter(Boolean);
 
-    // Permitir requests sem origin (Postman, apps mobile)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.log('⚠️  CORS bloqueou origem:', origin);
-      callback(null, true); // Temporariamente permitir para debug
+      console.log('CORS bloqueou origem:', origin);
+      callback(new Error('Não permitido pelo CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Requested-With',
-    'Accept',
-    'Origin'
-  ],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   exposedHeaders: ['X-Updated-Token']
 };
 
@@ -282,51 +275,23 @@ app.get(["/", "/api/health", "/health"], async (req, res) => {
     const dbStatus = mongoose.connection.readyState;
     const dbConnected = dbStatus === 1;
     
-    let ratesCount = 0;
-    let usersCount = 0;
-    let alertsCount = 0;
-    
-    if (dbConnected) {
-      try {
-        ratesCount = await Rate.countDocuments();
-        usersCount = await User.countDocuments();
-        alertsCount = await Alert.countDocuments();
-      } catch (error) {
-        console.error('Erro ao buscar estatísticas:', error.message);
-      }
-    }
-
     const health = {
       status: dbConnected ? "OK" : "DEGRADED",
       timestamp: new Date().toISOString(),
       version: "2.0.0",
       environment: process.env.NODE_ENV || 'development',
-      port: process.env.PORT || 5000,
+      url: `https://cambio-angola-backend.onrender.com`,
       database: {
         connected: dbConnected,
-        status: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbStatus] || 'unknown',
-        host: process.env.MONGODB_URI ? new URL(process.env.MONGODB_URI).hostname : 'localhost'
-      },
-      data: {
-        ratesCount,
-        usersCount,
-        alertsCount,
-        hasData: ratesCount > 0
-      },
-      uptime: Math.floor(process.uptime()),
-      memory: {
-        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+        status: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbStatus]
       }
     };
 
-    const statusCode = health.status === "OK" ? 200 : 503;
-    res.status(statusCode).json(health);
+    res.status(dbConnected ? 200 : 503).json(health);
   } catch (error) {
-    console.error("Erro no health check:", error);
     res.status(503).json({
       status: "ERROR",
-      error: error.message,
+      error: "Health check failed",
       timestamp: new Date().toISOString()
     });
   }
