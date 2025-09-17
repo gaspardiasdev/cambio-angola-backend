@@ -4,9 +4,9 @@
   "description": "API backend para o sistema Cambio Angola - taxas de câmbio em tempo real",
   "main": "server.js",
   "scripts": {
+    "build": "rm -rf node_modules && npm cache clean --force && npm install --no-package-lock",
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "build": "echo 'Build completed successfully'",
     "postinstall": "echo 'Post install completed'",
     "test": "echo 'No tests specified' && exit 0",
     "health": "curl http://localhost:5000/health || echo 'Health check completed'"
