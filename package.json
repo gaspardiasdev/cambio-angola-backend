@@ -24,8 +24,8 @@
   "author": "SidiaS alpha <sidiasalpha2k24@gmail.com>",
   "license": "MIT",
   "engines": {
-    "node": "18.x",
-    "npm": ">=8.0.0"
+    "node": "20.x",
+    "npm": ">=10.0.0"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
