@@ -4,7 +4,7 @@
   "description": "API backend para o sistema Cambio Angola - taxas de câmbio em tempo real",
   "main": "server.js",
   "scripts": {
-    "build": "rm -rf node_modules && npm cache clean --force && npm install --no-package-lock",
+    "build": "npm install",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "postinstall": "echo 'Post install completed'",
@@ -19,7 +19,7 @@
     "nodejs",
     "mongodb",
     "jwt",
-    "render"
+    "railway"
   ],
   "author": "SidiaS alpha <sidiasalpha2k24@gmail.com>",
   "license": "MIT",
@@ -28,16 +28,20 @@
     "npm": ">=10.0.0"
   },
   "dependencies": {
-    "bcryptjs": "2.4.0",
-    "express": "4.17.3",
-    "cors": "2.8.5",
-    "mongoose": "7.6.3",
-    "dotenv": "16.3.1",
-    "jsonwebtoken": "9.0.2",
-    "helmet": "7.1.0",
-    "compression": "1.7.4",
-    "morgan": "1.10.0",
-    "express-rate-limit": "6.10.0"
+    "bcrypt": "^5.1.1",
+    "bcryptjs": "^2.4.3",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "mongoose": "^7.6.3",
+    "dotenv": "^16.3.1",
+    "jsonwebtoken": "^9.0.2",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4",
+    "morgan": "^1.10.0",
+    "express-rate-limit": "^6.10.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.7",
+    "exceljs": "^4.4.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
