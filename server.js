@@ -7,6 +7,9 @@ const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const compression = require("compression");
 const morgan = require("morgan");
+const cron = require("node-cron");
+const nodemailer = require("nodemailer");
+const ExcelJS = require("exceljs");
 require("dotenv").config();
 
 // Validação de variáveis de ambiente
@@ -61,7 +64,7 @@ if (process.env.NODE_ENV === 'production') {
   app.use(morgan('dev'));
 }
 
-// Rate Limiting otimizado para Render
+// Rate Limiting otimizado
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: process.env.NODE_ENV === 'production' ? 1000 : 100,
@@ -79,7 +82,15 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
-// CORS Configuration otimizada para Render
+// Rate limiting específico por utilizador autenticado
+const createUserRateLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 30, // 30 requests por minuto por utilizador
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  message: { error: "Muitas requisições. Tente novamente em 1 minuto." },
+});
+
+// CORS Configuration otimizada
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
@@ -88,7 +99,6 @@ const corsOptions = {
       'https://seu-frontend.vercel.app',
       'http://localhost:3000',
       'http://localhost:5173',
-      'http://192.168.51.7:3000'
     ].filter(Boolean);
 
     // Permitir requests sem origin (health checks, etc)
@@ -115,7 +125,18 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
-// MongoDB Connection otimizada para Render
+// Middleware de logging para desenvolvimento
+app.use((req, res, next) => {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    if (req.headers.origin) {
+      console.log('Origin:', req.headers.origin);
+    }
+  }
+  next();
+});
+
+// MongoDB Connection otimizada
 const connectDB = async () => {
   if (!process.env.MONGODB_URI) {
     console.log('⚠️ MONGODB_URI não definida. Executando sem banco de dados.');
@@ -128,9 +149,10 @@ const connectDB = async () => {
   const connectionOptions = {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 5, // Reduzido para Render
+    maxPoolSize: 10,
     retryWrites: true,
     w: 'majority',
+    maxIdleTimeMS: 30000,
     bufferCommands: false,
   };
 
@@ -178,7 +200,11 @@ mongoose.connection.on('disconnected', () => {
   console.log('⚠️ MongoDB: Conexão perdida');
 });
 
-// Health check otimizado para Render
+mongoose.connection.on('reconnected', () => {
+  console.log('🔄 MongoDB: Reconectado');
+});
+
+// Health check otimizado
 app.get(["/", "/api/health", "/health"], async (req, res) => {
   try {
     const dbConnected = mongoose.connection.readyState === 1;
@@ -206,6 +232,10 @@ app.get(["/", "/api/health", "/health"], async (req, res) => {
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+      },
+      data: {
+        ratesCount,
+        hasData: ratesCount > 0
       }
     };
 
@@ -323,6 +353,92 @@ const authenticateAdmin = (req, res, next) => {
   next();
 };
 
+// Middleware para validar premium em tempo real
+const validatePremiumStatus = async (req, res, next) => {
+  try {
+    if (!req.user || !req.user.userId) {
+      return next();
+    }
+
+    const currentUser = await User.findById(req.user.userId);
+    if (!currentUser) {
+      return res.status(401).json({ message: "Utilizador não encontrado" });
+    }
+
+    // Verificar se o estado premium mudou
+    if (req.user.isPremium !== currentUser.isPremium) {
+      // Gerar novo token com estado atualizado
+      const newToken = jwt.sign(
+        {
+          userId: currentUser._id,
+          isPremium: currentUser.isPremium,
+          isAdmin: currentUser.isAdmin,
+          email: currentUser.email,
+        },
+        JWT_SECRET,
+        { expiresIn: "24h" }
+      );
+
+      // Enviar novo token no header da resposta
+      res.setHeader('X-Updated-Token', newToken);
+      
+      // Atualizar req.user para a requisição atual
+      req.user = {
+        ...req.user,
+        isPremium: currentUser.isPremium,
+        isAdmin: currentUser.isAdmin
+      };
+    }
+
+    next();
+  } catch (error) {
+    console.error("Erro na validação de premium:", error);
+    next();
+  }
+};
+
+// Middleware de validação de request body
+const validateRequestBody = (schema) => {
+  return (req, res, next) => {
+    const errors = [];
+
+    for (const [field, rules] of Object.entries(schema)) {
+      const value = req.body[field];
+
+      if (rules.required && (!value || value.toString().trim() === "")) {
+        errors.push(`${field} é obrigatório`);
+        continue;
+      }
+
+      if (value && rules.type === "number") {
+        const num = parseFloat(value);
+        if (
+          isNaN(num) ||
+          (rules.min && num < rules.min) ||
+          (rules.max && num > rules.max)
+        ) {
+          errors.push(`${field} deve ser um número válido`);
+        }
+      }
+
+      if (
+        value &&
+        rules.type === "string" &&
+        rules.maxLength &&
+        value.length > rules.maxLength
+      ) {
+        errors.push(`${field} excede o limite de caracteres`);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors[0], errors });
+    }
+
+    next();
+  };
+};
+
 // Cache simples
 const ratesCache = {
   data: null,
@@ -424,8 +540,43 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// Endpoint para forçar validação
+app.post("/api/auth/validate", authenticateToken, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user.userId);
+    if (!currentUser) {
+      return res.status(404).json({ message: "Utilizador não encontrado" });
+    }
+
+    const newToken = jwt.sign(
+      {
+        userId: currentUser._id,
+        isPremium: currentUser.isPremium,
+        isAdmin: currentUser.isAdmin,
+        email: currentUser.email,
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      token: newToken,
+      user: {
+        id: currentUser._id,
+        email: currentUser.email,
+        isPremium: currentUser.isPremium,
+        isAdmin: currentUser.isAdmin,
+      },
+      message: "Sessão validada com sucesso"
+    });
+  } catch (error) {
+    console.error("Erro na validação:", error);
+    res.status(500).json({ message: "Erro interno do servidor" });
+  }
+});
+
 // === ROTAS DE TAXAS ===
-app.get("/api/rates", async (req, res) => {
+app.get("/api/rates", validatePremiumStatus, async (req, res) => {
   try {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
@@ -434,7 +585,15 @@ app.get("/api/rates", async (req, res) => {
     if (token) {
       try {
         const user = jwt.verify(token, JWT_SECRET);
-        isPremium = user.isPremium;
+        
+        // VALIDAÇÃO DUPLA: Verificar na base de dados também
+        if (User && mongoose.connection.readyState === 1) {
+          const dbUser = await User.findById(user.userId);
+          isPremium = dbUser ? dbUser.isPremium : false;
+        } else {
+          isPremium = user.isPremium || false;
+        }
+        
       } catch (err) {
         isPremium = false;
       }
@@ -464,8 +623,147 @@ app.get("/api/rates", async (req, res) => {
   }
 });
 
+// Estatísticas das taxas
+app.get("/api/rates/stats", authenticateToken, async (req, res) => {
+  try {
+    const rates = await Rate.find().sort({ date: -1 }).limit(30);
+
+    if (rates.length < 2) {
+      return res.json({ message: "Dados insuficientes para estatísticas" });
+    }
+
+    const latest = rates[0];
+    const previous = rates[1];
+
+    const currencies = ["usd", "eur", "zar", "cad"];
+    const stats = {};
+
+    currencies.forEach((currency) => {
+      const buyField = `${currency}Buy`;
+      const sellField = `${currency}Sell`;
+
+      const buyChange =
+        ((latest[buyField] - previous[buyField]) / previous[buyField]) * 100;
+      const sellChange =
+        ((latest[sellField] - previous[sellField]) / previous[sellField]) * 100;
+
+      stats[currency] = {
+        buyChange: buyChange.toFixed(2),
+        sellChange: sellChange.toFixed(2),
+        trend: buyChange > 0 ? "up" : buyChange < 0 ? "down" : "stable",
+      };
+    });
+
+    res.json(stats);
+  } catch (error) {
+    console.error("Erro ao calcular estatísticas:", error);
+    res.status(500).json({ message: "Erro ao calcular estatísticas" });
+  }
+});
+
+// === ROTAS DO UTILIZADOR ===
+app.post("/api/user/phone", authenticateToken, async (req, res) => {
+  try {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+      return res.status(400).json({ message: "Número de telefone é obrigatório" });
+    }
+
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ message: "Utilizador não encontrado" });
+    }
+
+    user.phoneNumber = phoneNumber;
+    await user.save();
+
+    res.json({ message: "Número de telefone atualizado com sucesso!" });
+  } catch (error) {
+    console.error("Erro ao atualizar o número de telefone:", error);
+    res.status(500).json({ message: "Erro ao atualizar o número de telefone" });
+  }
+});
+
+// === ROTAS DE ALERTAS ===
+app.post("/api/alerts", 
+  authenticateToken, 
+  createUserRateLimit,
+  validateRequestBody({
+    currency: { required: true, type: "string" },
+    value: { required: true, type: "number", min: 0 },
+    rateType: { required: true, type: "string" },
+  }),
+  async (req, res) => {
+    try {
+      const { currency, value, type = "above", rateType = "buy" } = req.body;
+
+      if (!req.user.isPremium) {
+        const alertCount = await Alert.countDocuments({
+          userId: req.user.userId,
+          isTriggered: false,
+        });
+
+        if (alertCount >= 1) {
+          return res.status(403).json({
+            message: "Utilizadores básicos podem ter apenas 1 alerta ativo. Upgrade para Premium para alertas ilimitados.",
+          });
+        }
+      }
+
+      const newAlert = new Alert({
+        currency,
+        value: parseFloat(value),
+        type,
+        rateType,
+        userId: req.user.userId,
+      });
+
+      await newAlert.save();
+      res.status(201).json({
+        message: "Alerta criado com sucesso!",
+        alert: newAlert,
+      });
+    } catch (error) {
+      console.error("Erro ao criar alerta:", error);
+      res.status(500).json({ message: "Erro ao criar alerta" });
+    }
+  }
+);
+
+app.get("/api/alerts", authenticateToken, async (req, res) => {
+  try {
+    const alerts = await Alert.find({ userId: req.user.userId }).sort({
+      dateCreated: -1,
+    });
+    res.json(alerts);
+  } catch (error) {
+    console.error("Erro ao buscar alertas:", error);
+    res.status(500).json({ message: "Erro ao buscar alertas" });
+  }
+});
+
+app.delete("/api/alerts/:id", authenticateToken, async (req, res) => {
+  try {
+    const alert = await Alert.findOne({
+      _id: req.params.id,
+      userId: req.user.userId,
+    });
+
+    if (!alert) {
+      return res.status(404).json({ message: "Alerta não encontrado" });
+    }
+
+    await Alert.deleteOne({ _id: req.params.id });
+    res.json({ message: "Alerta removido com sucesso" });
+  } catch (error) {
+    console.error("Erro ao remover alerta:", error);
+    res.status(500).json({ message: "Erro ao remover alerta" });
+  }
+});
+
 // === SIMULADOR DE CÂMBIO ===
-app.post("/api/simulate", authenticateToken, async (req, res) => {
+app.post("/api/simulate", authenticateToken, createUserRateLimit, async (req, res) => {
   try {
     const { amount, fromCurrency, toCurrency, bank = "bna" } = req.body;
 
@@ -515,90 +813,304 @@ app.post("/api/simulate", authenticateToken, async (req, res) => {
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Erro não tratado:', err);
-  
-  res.status(500).json({ 
-    message: "Erro interno do servidor",
-    timestamp: new Date().toISOString()
-  });
-});
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ 
-    message: "Endpoint não encontrado",
-    path: req.path,
-    method: req.method,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Graceful shutdown
-const gracefulShutdown = async () => {
-  console.log('\n🛑 Iniciando graceful shutdown...');
+// === ROTA DE EXPORTAÇÃO DE DADOS ===
+app.post("/api/export-rates", authenticateToken, validatePremiumStatus, async (req, res) => {
   try {
-    if (mongoose.connection.readyState === 1) {
-      await mongoose.connection.close();
-      console.log('✅ Conexão MongoDB fechada');
+    if (!req.user.isPremium && !req.user.isAdmin) {
+      return res.status(403).json({ message: "Funcionalidade exclusiva para usuários Premium." });
+    }
+
+    const rates = await Rate.find().sort({ date: 1 });
+    if (!rates || rates.length === 0) {
+      return res.status(404).json({ message: "Nenhum dado de taxas para exportar." });
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Taxas de Câmbio");
+
+    worksheet.columns = [
+      { header: "Data", key: "date", width: 15 },
+      { header: "USD Compra", key: "usdBuy", width: 15 },
+      { header: "USD Venda", key: "usdSell", width: 15 },
+      { header: "EUR Compra", key: "eurBuy", width: 15 },
+      { header: "EUR Venda", key: "eurSell", width: 15 },
+      { header: "ZAR Compra", key: "zarBuy", width: 15 },
+      { header: "ZAR Venda", key: "zarSell", width: 15 },
+      { header: "CAD Compra", key: "cadBuy", width: 15 },
+      { header: "CAD Venda", key: "cadSell", width: 15 },
+    ];
+
+    rates.forEach((rate) => {
+      worksheet.addRow({
+        date: rate.date.toLocaleDateString("pt-AO"),
+        usdBuy: rate.usdBuy,
+        usdSell: rate.usdSell,
+        eurBuy: rate.eurBuy,
+        eurSell: rate.eurSell,
+        zarBuy: rate.zarBuy,
+        zarSell: rate.zarSell,
+        cadBuy: rate.cadBuy,
+        cadSell: rate.cadSell,
+      });
+    });
+
+    // Estilizar o cabeçalho
+    worksheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true };
+      cell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE6E6FA" },
+      };
+    });
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=taxas-cambio-${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (error) {
+    console.error("Erro na exportação:", error);
+    res.status(500).json({ message: "Erro ao exportar dados" });
+  }
+});
+
+// === ROTAS ADMINISTRATIVAS ===
+app.post("/api/admin/rates", authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { usdBuy, usdSell, eurBuy, eurSell, zarBuy, zarSell, cadBuy, cadSell } = req.body;
+
+    if (!usdBuy || !usdSell || !eurBuy || !eurSell || !zarBuy || !zarSell || !cadBuy || !cadSell) {
+      return res.status(400).json({ message: "Todos os campos de taxas são obrigatórios" });
+    }
+
+    const newRate = new Rate({
+      date: new Date(),
+      usdBuy: parseFloat(usdBuy),
+      usdSell: parseFloat(usdSell),
+      eurBuy: parseFloat(eurBuy),
+      eurSell: parseFloat(eurSell),
+      zarBuy: parseFloat(zarBuy),
+      zarSell: parseFloat(zarSell),
+      cadBuy: parseFloat(cadBuy),
+      cadSell: parseFloat(cadSell),
+      source: "Admin",
+      confidence: "high",
+    });
+
+    await newRate.save();
+
+    // Limpar cache
+    ratesCache.data = null;
+    ratesCache.timestamp = 0;
+
+    res.status(201).json({
+      message: "Taxa adicionada com sucesso!",
+      rate: newRate,
+    });
+  } catch (error) {
+    console.error("Erro ao adicionar taxa:", error);
+    res.status(500).json({ message: "Erro ao adicionar taxa" });
+  }
+});
+
+app.get("/api/admin/users", authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const users = await User.find({}, "-password").sort({ createdAt: -1 });
+    
+    const userStats = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          premium: { $sum: { $cond: ["$isPremium", 1, 0] } },
+          basic: { $sum: { $cond: ["$isPremium", 0, 1] } },
+          admins: { $sum: { $cond: ["$isAdmin", 1, 0] } }
+        }
+      }
+    ]);
+
+    res.json({
+      users,
+      stats: userStats[0] || { total: 0, premium: 0, basic: 0, admins: 0 }
+    });
+  } catch (error) {
+    console.error("Erro ao buscar usuários:", error);
+    res.status(500).json({ message: "Erro ao buscar usuários" });
+  }
+});
+
+app.patch("/api/admin/users/:id/premium", authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { isPremium } = req.body;
+    
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isPremium: Boolean(isPremium) },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "Utilizador não encontrado" });
+    }
+
+    res.json({
+      message: `Status Premium ${isPremium ? 'ativado' : 'desativado'} com sucesso!`,
+      user: {
+        id: user._id,
+        email: user.email,
+        isPremium: user.isPremium,
+        isAdmin: user.isAdmin
+      }
+    });
+  } catch (error) {
+    console.error("Erro ao atualizar status premium:", error);
+    res.status(500).json({ message: "Erro ao atualizar status premium" });
+  }
+});
+
+app.get("/api/admin/alerts", authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const alerts = await Alert.find({})
+      .populate('userId', 'email')
+      .sort({ dateCreated: -1 });
+    
+    res.json(alerts);
+  } catch (error) {
+    console.error("Erro ao buscar alertas:", error);
+    res.status(500).json({ message: "Erro ao buscar alertas" });
+  }
+});
+
+// === SISTEMA DE NOTIFICAÇÕES ===
+const checkAlerts = async () => {
+  try {
+    if (!Alert || !Rate || mongoose.connection.readyState !== 1) {
+      return;
+    }
+
+    const activeAlerts = await Alert.find({ isTriggered: false });
+    const latestRate = await Rate.findOne().sort({ date: -1 });
+
+    if (!latestRate || activeAlerts.length === 0) {
+      return;
+    }
+
+    for (const alert of activeAlerts) {
+      const rateField = `${alert.currency}${alert.rateType === 'buy' ? 'Buy' : 'Sell'}`;
+      const currentRate = latestRate[rateField];
+
+      let shouldTrigger = false;
+      
+      if (alert.type === 'above' && currentRate >= alert.value) {
+        shouldTrigger = true;
+      } else if (alert.type === 'below' && currentRate <= alert.value) {
+        shouldTrigger = true;
+      }
+
+      if (shouldTrigger) {
+        alert.isTriggered = true;
+        alert.triggeredAt = new Date();
+        alert.triggeredValue = currentRate;
+        await alert.save();
+
+        // Aqui você pode implementar envio de email/SMS
+        console.log(`🔔 Alerta disparado para ${alert.currency.toUpperCase()}: ${currentRate} (${alert.type} ${alert.value})`);
+      }
     }
   } catch (error) {
-    console.error('❌ Erro ao fechar conexão MongoDB:', error);
+    console.error('Erro ao verificar alertas:', error);
   }
-  process.exit(0);
 };
 
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+// Executar verificação de alertas a cada 5 minutos
+cron.schedule('*/5 * * * *', checkAlerts);
 
-// Função de inicialização do servidor
+// === MIDDLEWARE DE TRATAMENTO DE ERROS ===
+app.use((err, req, res, next) => {
+  console.error('Erro não tratado:', err);
+  res.status(500).json({
+    message: 'Erro interno do servidor',
+    error: process.env.NODE_ENV === 'production' ? {} : err
+  });
+});
+
+// === TRATAMENTO DE ROTAS NÃO ENCONTRADAS ===
+app.use("*", (req, res) => {
+  res.status(404).json({
+    message: "Rota não encontrada",
+    availableEndpoints: [
+      "GET /",
+      "GET /api/health",
+      "POST /api/auth/register",
+      "POST /api/auth/login",
+      "POST /api/auth/validate",
+      "GET /api/rates",
+      "GET /api/rates/stats",
+      "POST /api/alerts",
+      "GET /api/alerts",
+      "DELETE /api/alerts/:id",
+      "POST /api/simulate",
+      "POST /api/export-rates",
+      "POST /api/admin/rates",
+      "GET /api/admin/users",
+      "PATCH /api/admin/users/:id/premium",
+      "GET /api/admin/alerts",
+    ]
+  });
+});
+
+// === INICIALIZAÇÃO DO SERVIDOR ===
 const startServer = async () => {
   try {
     console.log('🚀 Iniciando servidor...');
     
-    // Tentar conectar ao MongoDB
-    if (process.env.MONGODB_URI) {
-      await connectDB();
-    }
+    // Tentar conectar à base de dados
+    const dbConnected = await connectDB();
     
-    // Iniciar servidor HTTP
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`
-🚀 ====================================
-   Servidor Cambio Angola iniciado!
-🌐 URL: http://localhost:${PORT}
-📊 Ambiente: ${process.env.NODE_ENV || "development"}
-⏰ Horário: ${new Date().toLocaleString("pt-PT")}
-📊 MongoDB: ${mongoose.connection.readyState === 1 ? 'Conectado' : 'Desconectado'}
-====================================
-      `);
+    if (!dbConnected) {
+      console.log('⚠️ Servidor iniciará sem base de dados (modo offline)');
+    }
+
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`✅ Servidor rodando na porta ${PORT}`);
+      console.log(`🌐 Ambiente: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`📊 Base de dados: ${dbConnected ? 'Conectada' : 'Desconectada'}`);
+      console.log('📋 Endpoints disponíveis:');
+      console.log(`   - Health: http://localhost:${PORT}/`);
+      console.log(`   - API: http://localhost:${PORT}/api/`);
     });
 
-    // Configurar timeouts para Render
-    server.keepAliveTimeout = 120000;
-    server.headersTimeout = 120000;
-    
-    server.on('error', (error) => {
-      console.error('❌ Erro no servidor:', error);
-      if (error.code === 'EADDRINUSE') {
-        console.error(`❌ Porta ${PORT} já está em uso`);
-        process.exit(1);
-      }
-    });
+    // Graceful shutdown
+    const gracefulShutdown = (signal) => {
+      console.log(`\n🛑 Recebido sinal ${signal}. Encerrando servidor...`);
+      
+      server.close(async () => {
+        console.log('📴 Servidor HTTP encerrado');
+        
+        if (mongoose.connection.readyState === 1) {
+          try {
+            await mongoose.connection.close();
+            console.log('📴 Conexão MongoDB encerrada');
+          } catch (error) {
+            console.error('Erro ao fechar MongoDB:', error);
+          }
+        }
+        
+        console.log('✅ Encerramento concluído');
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   } catch (error) {
-    console.error('❌ Falha ao iniciar servidor:', error);
+    console.error('❌ Erro ao iniciar servidor:', error);
     process.exit(1);
   }
 };
 
-// Iniciar servidor
-if (require.main === module) {
-  startServer().catch((error) => {
-    console.error('❌ Erro fatal:', error);
-    process.exit(1);
-  });
-}
-
-module.exports = app;
+// Iniciar o servidor
+startServer();
