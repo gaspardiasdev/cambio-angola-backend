@@ -1,21 +1,15 @@
-/* eslint-disable no-irregular-whitespace */
-/* eslint-disable no-unused-vars */
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const cron = require("node-cron");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const rateLimit = require("express-rate-limit");
-const nodemailer = require("nodemailer");
 const helmet = require("helmet");
 const compression = require("compression");
 const morgan = require("morgan");
 require("dotenv").config();
 
 // Validação de variáveis de ambiente
-console.log('🔍 Validando variáveis de ambiente...');
-
 const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
@@ -36,22 +30,30 @@ console.log('📋 Configuração do ambiente:');
 console.log('- NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('- PORT:', process.env.PORT || 5000);
 console.log('- MONGODB_URI:', process.env.MONGODB_URI ? '✅ Definido' : '❌ Não definido');
-console.log('- JWT_SECRET:', process.env.JWT_SECRET ? '✅ Definido' : '❌ Não definido');
 
-// Models
-const User = require("./models/userModel");
-const Rate = require("./models/rateModel");
-const Alert = require("./models/alertModel");
+// Importar models apenas se MongoDB estiver disponível
+let User, Rate, Alert;
+const initModels = () => {
+  try {
+    User = require("./models/userModel");
+    Rate = require("./models/rateModel");
+    Alert = require("./models/alertModel");
+    console.log('✅ Models carregados com sucesso');
+  } catch (error) {
+    console.error('⚠️ Erro ao carregar models:', error.message);
+  }
+};
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CONFIGURAÇÃO DE SEGURANÇA PRIMEIRO
+// CONFIGURAÇÃO DE SEGURANÇA
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: false
+}));
+
 if (process.env.NODE_ENV === 'production') {
-  app.use(helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: false
-  }));
   app.use(compression());
   app.use(morgan('combined'));
   app.set('trust proxy', 1);
@@ -59,21 +61,25 @@ if (process.env.NODE_ENV === 'production') {
   app.use(morgan('dev'));
 }
 
-// Rate Limiting
+// Rate Limiting otimizado para Render
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 500,
+  max: process.env.NODE_ENV === 'production' ? 1000 : 100,
   message: {
     error: "Muitas requisições deste IP",
     retryAfter: "15 minutos",
   },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting para health checks
+    return req.path === '/' || req.path === '/health' || req.path === '/api/health';
+  }
 });
 
 app.use(limiter);
 
-// CORS Configuration - Mais permissiva para deployment
+// CORS Configuration otimizada para Render
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
@@ -82,24 +88,20 @@ const corsOptions = {
       'https://seu-frontend.vercel.app',
       'http://localhost:3000',
       'http://localhost:5173',
-      'http://localhost:5000', // Para health checks
     ].filter(Boolean);
 
-    // Em produção, permitir requests sem origin (ex: health checks)
-    if (!origin && process.env.NODE_ENV === 'production') {
+    // Permitir requests sem origin (health checks, etc)
+    if (!origin) return callback(null, true);
+    
+    // Em produção, ser mais permissivo para evitar falhas de deployment
+    if (process.env.NODE_ENV === 'production') {
       return callback(null, true);
     }
     
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.log('CORS bloqueou origem:', origin);
-      // Em produção, ser mais permissivo para evitar falhas de deployment
-      if (process.env.NODE_ENV === 'production') {
-        callback(null, true);
-      } else {
-        callback(new Error('Não permitido pelo CORS'));
-      }
+      callback(null, true); // Permitir em desenvolvimento
     }
   },
   credentials: true,
@@ -112,29 +114,22 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
-// Logging middleware
-app.use((req, res, next) => {
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-    if (req.headers.origin) {
-      console.log('Origin:', req.headers.origin);
-    }
-  }
-  next();
-});
-
-// MongoDB Connection com timeout reduzido para deployment
+// MongoDB Connection otimizada para Render
 const connectDB = async () => {
-  const maxRetries = process.env.NODE_ENV === 'production' ? 5 : 3;
+  if (!process.env.MONGODB_URI) {
+    console.log('⚠️ MONGODB_URI não definida. Executando sem banco de dados.');
+    return false;
+  }
+
+  const maxRetries = 3;
   let retries = 0;
   
   const connectionOptions = {
-    serverSelectionTimeoutMS: process.env.NODE_ENV === 'production' ? 10000 : 5000,
+    serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    maxPoolSize: 10,
+    maxPoolSize: 5, // Reduzido para Render
     retryWrites: true,
     w: 'majority',
-    maxIdleTimeMS: 30000,
     bufferCommands: false,
   };
 
@@ -142,16 +137,16 @@ const connectDB = async () => {
     try {
       console.log(`🔄 Tentativa de conexão MongoDB ${retries + 1}/${maxRetries}...`);
       
-      const mongoUri = process.env.MONGODB_URI;
-      if (!mongoUri) {
-        throw new Error('MONGODB_URI não definida nas variáveis de ambiente');
-      }
-      
-      await mongoose.connect(mongoUri, connectionOptions);
-      
+      await mongoose.connect(process.env.MONGODB_URI, connectionOptions);
       console.log("✅ MongoDB conectado com sucesso!");
-      await initializeDatabase();
-      return;
+      
+      // Carregar models após conexão
+      initModels();
+      
+      // Inicializar database
+      setTimeout(() => initializeDatabase(), 1000);
+      
+      return true;
       
     } catch (error) {
       retries++;
@@ -159,23 +154,17 @@ const connectDB = async () => {
       
       if (retries >= maxRetries) {
         console.error("❌ Máximo de tentativas de conexão excedido");
-        
-        if (process.env.NODE_ENV === 'production') {
-          console.log("⚠️ Continuando sem MongoDB - modo degradado");
-          return; // Não fazer throw em produção
-        } else {
-          throw error;
-        }
+        console.log("⚠️ Continuando sem MongoDB - modo offline");
+        return false;
       }
       
-      const waitTime = Math.min(1000 * retries, 5000);
-      console.log(`⏳ Aguardando ${waitTime}ms antes da próxima tentativa...`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
+  return false;
 };
 
-// Enhanced MongoDB event listeners
+// Event listeners do MongoDB
 mongoose.connection.on('connected', () => {
   console.log('📊 MongoDB: Conexão estabelecida');
 });
@@ -188,74 +177,40 @@ mongoose.connection.on('disconnected', () => {
   console.log('⚠️ MongoDB: Conexão perdida');
 });
 
-mongoose.connection.on('reconnected', () => {
-  console.log('🔄 MongoDB: Reconectado');
-});
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 Recebido SIGTERM. Fechando servidor graciosamente...');
-  await gracefulShutdown();
-});
-
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Recebido SIGINT. Fechando servidor graciosamente...');
-  await gracefulShutdown();
-});
-
-const gracefulShutdown = async () => {
-  try {
-    if (mongoose.connection.readyState === 1) {
-      await mongoose.connection.close();
-      console.log('✅ Conexão MongoDB fechada');
-    }
-  } catch (error) {
-    console.error('❌ Erro ao fechar conexão MongoDB:', error);
-  }
-  process.exit(0);
-};
-
-// Health check melhorado para deployment
+// Health check otimizado para Render
 app.get(["/", "/api/health", "/health"], async (req, res) => {
   try {
-    const dbStatus = mongoose.connection.readyState;
-    const dbConnected = dbStatus === 1;
+    const dbConnected = mongoose.connection.readyState === 1;
     
     let ratesCount = 0;
-    if (dbConnected) {
+    if (dbConnected && Rate) {
       try {
         ratesCount = await Rate.countDocuments();
       } catch (error) {
-        console.error('Erro ao contar rates:', error);
+        console.error('Erro ao contar rates:', error.message);
       }
     }
 
     const health = {
-      status: "OK", // Sempre OK para evitar falhas de deployment
+      status: "OK",
       timestamp: new Date().toISOString(),
       version: "2.0.0",
       environment: process.env.NODE_ENV || 'development',
-      port: process.env.PORT || 5000,
+      port: PORT,
       database: {
         connected: dbConnected,
-        status: ['disconnected', 'connected', 'connecting', 'disconnecting'][dbStatus] || 'unknown'
-      },
-      data: {
-        ratesCount,
-        hasData: ratesCount > 0
+        status: dbConnected ? 'connected' : 'disconnected'
       },
       uptime: Math.floor(process.uptime()),
-      deployment: {
-        region: process.env.DEPLOYMENT_REGION || 'unknown',
-        timestamp: process.env.DEPLOYMENT_TIMESTAMP || new Date().toISOString()
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
       }
     };
 
-    // Sempre retorna 200 para health checks de deployment
     res.status(200).json(health);
   } catch (error) {
     console.error("Erro no health check:", error);
-    // Mesmo com erro, retorna status OK para não falhar deployment
     res.status(200).json({
       status: "OK",
       error: "Health check com avisos",
@@ -265,11 +220,11 @@ app.get(["/", "/api/health", "/health"], async (req, res) => {
   }
 });
 
-// Initialize Database com melhor tratamento de erros
+// Initialize Database
 const initializeDatabase = async () => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      console.log("⚠️ MongoDB não conectado. Pulando inicialização.");
+    if (!User || !Rate || mongoose.connection.readyState !== 1) {
+      console.log("⚠️ Modelos não carregados ou MongoDB desconectado");
       return;
     }
 
@@ -285,8 +240,6 @@ const initializeDatabase = async () => {
         }))
       );
       console.log("✅ Dados de taxas inseridos com sucesso!");
-    } else {
-      console.log(`📊 Base já contém ${rateCount} registros de taxas.`);
     }
 
     // Criar admin se não existir
@@ -302,12 +255,11 @@ const initializeDatabase = async () => {
       console.log("👤 Conta admin criada: admin@cambio.ao / admin123");
     }
   } catch (error) {
-    console.error("❌ Erro na inicialização:", error);
-    // Não fazer throw para não falhar o deployment
+    console.error("❌ Erro na inicialização:", error.message);
   }
 };
 
-// Dados de câmbio com oscilação realista
+// Geração de dados mock
 const generateRatesData = () => {
   const rates = [];
   const baseRates = {
@@ -345,8 +297,7 @@ const generateRatesData = () => {
   return rates;
 };
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_here";
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // Middleware de autenticação
 const authenticateToken = (req, res, next) => {
@@ -371,67 +322,25 @@ const authenticateAdmin = (req, res, next) => {
   next();
 };
 
-// Cache simples para rates
+// Cache simples
 const ratesCache = {
   data: null,
   timestamp: 0,
   ttl: 60000,
 };
 
-// Middleware para validar premium em tempo real
-const validatePremiumStatus = async (req, res, next) => {
-  try {
-    if (!req.user || !req.user.userId) {
-      return next();
-    }
-
-    // Verificar se MongoDB está conectado
-    if (mongoose.connection.readyState !== 1) {
-      return next();
-    }
-
-    const currentUser = await User.findById(req.user.userId);
-    if (!currentUser) {
-      return res.status(401).json({ message: "Utilizador não encontrado" });
-    }
-
-    if (req.user.isPremium !== currentUser.isPremium) {
-      const newToken = jwt.sign(
-        {
-          userId: currentUser._id,
-          isPremium: currentUser.isPremium,
-          isAdmin: currentUser.isAdmin,
-          email: currentUser.email,
-        },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
-      res.setHeader('X-Updated-Token', newToken);
-      
-      req.user = {
-        ...req.user,
-        isPremium: currentUser.isPremium,
-        isAdmin: currentUser.isAdmin
-      };
-    }
-
-    next();
-  } catch (error) {
-    console.error("Erro na validação de premium:", error);
-    next();
-  }
-};
-
-// === ROTAS DE AUTENTICAÇÃO ===
-
 const validateEmail = (email) => {
   const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
   return emailRegex.test(email) && email.length <= 254;
 };
 
+// === ROTAS DE AUTENTICAÇÃO ===
 app.post("/api/auth/register", async (req, res) => {
   try {
+    if (!User) {
+      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
+    }
+
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -444,11 +353,6 @@ app.post("/api/auth/register", async (req, res) => {
 
     if (password.length < 8) {
       return res.status(400).json({ message: "Senha deve ter pelo menos 8 caracteres" });
-    }
-
-    // Verificar se MongoDB está conectado
-    if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
     }
 
     const existingUser = await User.findOne({ email });
@@ -469,15 +373,14 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   try {
+    if (!User) {
+      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
+    }
+
     const { email, password } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ message: "Email e senha são obrigatórios" });
-    }
-
-    // Verificar se MongoDB está conectado
-    if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
     }
 
     const user = await User.findOne({ email });
@@ -521,7 +424,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // === ROTAS DE TAXAS ===
-app.get("/api/rates", validatePremiumStatus, async (req, res) => {
+app.get("/api/rates", async (req, res) => {
   try {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
@@ -530,76 +433,99 @@ app.get("/api/rates", validatePremiumStatus, async (req, res) => {
     if (token) {
       try {
         const user = jwt.verify(token, JWT_SECRET);
-        
-        // Verificar se MongoDB está conectado antes de consultar
-        if (mongoose.connection.readyState === 1) {
-          const dbUser = await User.findById(user.userId);
-          isPremium = dbUser ? dbUser.isPremium : false;
-          
-          if (user.isPremium !== isPremium) {
-            console.log(`⚠️ Discrepância detectada para ${user.email}: Token=${user.isPremium}, DB=${isPremium}`);
-          }
-        } else {
-          isPremium = user.isPremium; // Usar dados do token se DB não estiver disponível
-        }
+        isPremium = user.isPremium;
       } catch (err) {
         isPremium = false;
       }
     }
 
-    const cacheKey = isPremium ? 'rates_premium' : 'rates_basic';
     const limit = isPremium ? 30 : 7;
     
     let rates;
-    if (ratesCache[cacheKey] && (Date.now() - ratesCache[cacheKey].timestamp) < 60000) {
-      rates = ratesCache[cacheKey].data;
+    if (ratesCache.data && (Date.now() - ratesCache.timestamp) < 60000) {
+      rates = ratesCache.data.slice(0, limit);
     } else {
-      // Verificar se MongoDB está conectado
-      if (mongoose.connection.readyState !== 1) {
-        // Retornar dados de exemplo se DB não estiver disponível
-        rates = generateRatesData().slice(0, limit);
-      } else {
+      if (Rate && mongoose.connection.readyState === 1) {
         rates = await Rate.find().sort({ date: -1 }).limit(limit);
+      } else {
+        rates = generateRatesData().slice(0, limit);
       }
       
-      ratesCache[cacheKey] = {
-        data: rates,
-        timestamp: Date.now()
-      };
+      ratesCache.data = rates;
+      ratesCache.timestamp = Date.now();
     }
 
     res.json(rates);
   } catch (error) {
     console.error("Erro ao buscar taxas:", error);
-    // Em caso de erro, retornar dados de exemplo
-    const limit = 7; // Assume usuário básico em caso de erro
-    const fallbackRates = generateRatesData().slice(0, limit);
+    const fallbackRates = generateRatesData().slice(0, 7);
     res.json(fallbackRates);
   }
 });
 
-// Error handling middleware melhorado
+// === SIMULADOR DE CÂMBIO ===
+app.post("/api/simulate", authenticateToken, async (req, res) => {
+  try {
+    const { amount, fromCurrency, toCurrency, bank = "bna" } = req.body;
+
+    if (!amount || !fromCurrency || !toCurrency) {
+      return res.status(400).json({ message: "Dados incompletos para simulação" });
+    }
+
+    let latestRates;
+    if (Rate && mongoose.connection.readyState === 1) {
+      latestRates = await Rate.findOne().sort({ date: -1 });
+    }
+    
+    if (!latestRates) {
+      const fallbackRates = generateRatesData()[0];
+      latestRates = fallbackRates;
+    }
+
+    const bankFees = {
+      bna: 0.5,
+      bic: 1.2,
+      bai: 1.0,
+      standard: 1.5,
+      millennium: 1.3,
+    };
+
+    const fee = bankFees[bank] || 1.0;
+    const rate = latestRates[`${fromCurrency}Sell`] || 1;
+
+    const baseAmount = amount * rate;
+    const feeAmount = baseAmount * (fee / 100);
+    const finalAmount = baseAmount - feeAmount;
+
+    res.json({
+      amount: parseFloat(amount),
+      fromCurrency: fromCurrency.toUpperCase(),
+      toCurrency: toCurrency.toUpperCase(),
+      rate,
+      baseAmount,
+      feePercentage: fee,
+      feeAmount,
+      finalAmount,
+      bank: bank.toUpperCase(),
+    });
+  } catch (error) {
+    console.error("Erro na simulação:", error);
+    res.status(500).json({ message: "Erro na simulação" });
+  }
+});
+
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Erro não tratado:', err);
   
-  if (process.env.NODE_ENV === 'production') {
-    res.status(500).json({ 
-      message: "Erro interno do servidor",
-      timestamp: new Date().toISOString()
-    });
-  } else {
-    res.status(500).json({ 
-      message: "Erro interno do servidor",
-      error: err.message,
-      stack: err.stack,
-      timestamp: new Date().toISOString()
-    });
-  }
+  res.status(500).json({ 
+    message: "Erro interno do servidor",
+    timestamp: new Date().toISOString()
+  });
 });
 
 // 404 handler
 app.use((req, res) => {
-  console.log(`404 - Endpoint não encontrado: ${req.method} ${req.path}`);
   res.status(404).json({ 
     message: "Endpoint não encontrado",
     path: req.path,
@@ -608,22 +534,31 @@ app.use((req, res) => {
   });
 });
 
-// === ADICIONAR OUTRAS ROTAS AQUI ===
-// [Adicione suas outras rotas de alerts, admin, etc. aqui]
+// Graceful shutdown
+const gracefulShutdown = async () => {
+  console.log('\n🛑 Iniciando graceful shutdown...');
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await mongoose.connection.close();
+      console.log('✅ Conexão MongoDB fechada');
+    }
+  } catch (error) {
+    console.error('❌ Erro ao fechar conexão MongoDB:', error);
+  }
+  process.exit(0);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 // Função de inicialização do servidor
 const startServer = async () => {
   try {
     console.log('🚀 Iniciando servidor...');
     
-    // Tentar conectar ao MongoDB, mas não falhar se não conseguir
+    // Tentar conectar ao MongoDB
     if (process.env.MONGODB_URI) {
-      try {
-        await connectDB();
-      } catch (dbError) {
-        console.error('⚠️ Falha na conexão inicial com MongoDB:', dbError.message);
-        console.log('🔄 Servidor continuará em modo degradado...');
-      }
+      await connectDB();
     }
     
     // Iniciar servidor HTTP
@@ -639,6 +574,10 @@ const startServer = async () => {
       `);
     });
 
+    // Configurar timeouts para Render
+    server.keepAliveTimeout = 120000;
+    server.headersTimeout = 120000;
+    
     server.on('error', (error) => {
       console.error('❌ Erro no servidor:', error);
       if (error.code === 'EADDRINUSE') {
@@ -647,9 +586,6 @@ const startServer = async () => {
       }
     });
 
-    // Configurar timeout do servidor para deployment
-    server.timeout = 30000; // 30 segundos
-
   } catch (error) {
     console.error('❌ Falha ao iniciar servidor:', error);
     process.exit(1);
@@ -657,9 +593,11 @@ const startServer = async () => {
 };
 
 // Iniciar servidor
-startServer().catch((error) => {
-  console.error('❌ Erro fatal:', error);
-  process.exit(1);
-});
+if (require.main === module) {
+  startServer().catch((error) => {
+    console.error('❌ Erro fatal:', error);
+    process.exit(1);
+  });
+}
 
 module.exports = app;

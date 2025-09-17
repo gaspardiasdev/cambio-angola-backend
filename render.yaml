@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: cambio-angola-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+    autoDeploy: true
+    disk:
+      name: cambio-angola-disk
+      mountPath: /opt/render/project/src
+      sizeGB: 1
