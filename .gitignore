@@ -8,3 +8,18 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .DS_Store
+
+# Environment variables
+.env.development
+.env.production
+.env.test
+
+# Logs
+*.log
+
+# Node modules (se não estiver já)
+node_modules/
+
+# Build outputs
+dist/
+build/
