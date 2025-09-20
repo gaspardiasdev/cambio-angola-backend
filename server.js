@@ -10,29 +10,35 @@ const morgan = require("morgan");
 const cron = require("node-cron");
 const nodemailer = require("nodemailer");
 const ExcelJS = require("exceljs");
+const { OAuth2Client } = require("google-auth-library");
 require("dotenv").config();
 
 // Validação de variáveis de ambiente
-const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET'];
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+const requiredEnvVars = ["MONGODB_URI", "JWT_SECRET"];
+const missingEnvVars = requiredEnvVars.filter(
+  (varName) => !process.env[varName]
+);
 
 if (missingEnvVars.length > 0) {
-  console.error('❌ Variáveis de ambiente em falta:', missingEnvVars);
-  if (process.env.NODE_ENV === 'production') {
-    console.log('⚠️ Usando valores padrão para variáveis em falta...');
+  console.error("❌ Variáveis de ambiente em falta:", missingEnvVars);
+  if (process.env.NODE_ENV === "production") {
+    console.log("⚠️ Usando valores padrão para variáveis em falta...");
   }
 }
 
 // Set defaults for missing variables
 if (!process.env.JWT_SECRET) {
-  process.env.JWT_SECRET = 'your_super_secret_key_here_change_in_production';
-  console.log('⚠️ Usando JWT_SECRET padrão - ALTERE em produção!');
+  process.env.JWT_SECRET = "your_super_secret_key_here_change_in_production";
+  console.log("⚠️ Usando JWT_SECRET padrão - ALTERE em produção!");
 }
 
-console.log('📋 Configuração do ambiente:');
-console.log('- NODE_ENV:', process.env.NODE_ENV || 'development');
-console.log('- PORT:', process.env.PORT || 5000);
-console.log('- MONGODB_URI:', process.env.MONGODB_URI ? '✅ Definido' : '❌ Não definido');
+console.log("📋 Configuração do ambiente:");
+console.log("- NODE_ENV:", process.env.NODE_ENV || "development");
+console.log("- PORT:", process.env.PORT || 5000);
+console.log(
+  "- MONGODB_URI:",
+  process.env.MONGODB_URI ? "✅ Definido" : "❌ Não definido"
+);
 
 // Importar models apenas se MongoDB estiver disponível
 let User, Rate, Alert;
@@ -41,9 +47,9 @@ const initModels = () => {
     User = require("./models/userModel");
     Rate = require("./models/rateModel");
     Alert = require("./models/alertModel");
-    console.log('✅ Models carregados com sucesso');
+    console.log("✅ Models carregados com sucesso");
   } catch (error) {
-    console.error('⚠️ Erro ao carregar models:', error.message);
+    console.error("⚠️ Erro ao carregar models:", error.message);
   }
 };
 
@@ -51,23 +57,25 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // CONFIGURAÇÃO DE SEGURANÇA
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-  contentSecurityPolicy: false
-}));
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false,
+  })
+);
 
-if (process.env.NODE_ENV === 'production') {
+if (process.env.NODE_ENV === "production") {
   app.use(compression());
-  app.use(morgan('combined'));
-  app.set('trust proxy', 1);
+  app.use(morgan("combined"));
+  app.set("trust proxy", 1);
 } else {
-  app.use(morgan('dev'));
+  app.use(morgan("dev"));
 }
 
 // Rate Limiting otimizado
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: process.env.NODE_ENV === 'production' ? 1000 : 100,
+  max: process.env.NODE_ENV === "production" ? 1000 : 100,
   message: {
     error: "Muitas requisições deste IP",
     retryAfter: "15 minutos",
@@ -76,8 +84,10 @@ const limiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => {
     // Skip rate limiting para health checks
-    return req.path === '/' || req.path === '/health' || req.path === '/api/health';
-  }
+    return (
+      req.path === "/" || req.path === "/health" || req.path === "/api/health"
+    );
+  },
 });
 
 app.use(limiter);
@@ -95,21 +105,21 @@ const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       process.env.FRONTEND_URL,
-      'https://seu-frontend.netlify.app',
-      'https://seu-frontend.vercel.app',
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://192.168.51.7:3000'
+      "https://seu-frontend.netlify.app",
+      "https://seu-frontend.vercel.app",
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://192.168.51.7:3000",
     ].filter(Boolean);
 
     // Permitir requests sem origin (health checks, etc)
     if (!origin) return callback(null, true);
-    
+
     // Em produção, ser mais permissivo para evitar falhas de deployment
-    if (process.env.NODE_ENV === 'production') {
+    if (process.env.NODE_ENV === "production") {
       return callback(null, true);
     }
-    
+
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -117,21 +127,169 @@ const corsOptions = {
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-  exposedHeaders: ['X-Updated-Token']
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
+  exposedHeaders: ["X-Updated-Token"],
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '10mb' }));
+app.options("*", cors(corsOptions));
+app.use(express.json({ limit: "10mb" }));
+
+// Initialize Google OAuth client
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// Verify Google token function
+const verifyGoogleToken = async (token) => {
+  try {
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    return ticket.getPayload();
+  } catch (error) {
+    console.error("Error verifying Google token:", error);
+    throw new Error("Token do Google inválido");
+  }
+};
+
+// === GOOGLE OAUTH ROUTE ===
+// Add this route to your existing routes section
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    if (!User) {
+      return res
+        .status(503)
+        .json({ message: "Serviço temporariamente indisponível" });
+    }
+
+    const { credential, userInfo } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ message: "Token do Google é obrigatório" });
+    }
+
+    // Verify the Google token
+    let googlePayload;
+    try {
+      googlePayload = await verifyGoogleToken(credential);
+    } catch (error) {
+      return res.status(400).json({ message: "Token do Google inválido" });
+    }
+
+    const { email, name, picture, sub: googleId } = googlePayload;
+
+    if (!email) {
+      return res
+        .status(400)
+        .json({ message: "Email não fornecido pelo Google" });
+    }
+
+    // Check if user already exists
+    let user = await User.findOne({
+      $or: [{ email: email }, { googleId: googleId }],
+    });
+
+    if (user) {
+      // User exists, update Google info if not set
+      if (!user.googleId) {
+        user.googleId = googleId;
+        user.name = user.name || name;
+        user.picture = picture;
+        await user.save();
+      }
+
+      // Update last login
+      user.lastLogin = new Date();
+      await user.save();
+
+      logger.info("Login Google realizado", {
+        details: { email: user.email, method: "google" },
+      });
+    } else {
+      // Create new user with Google info
+      user = new User({
+        email: email,
+        googleId: googleId,
+        name: name,
+        picture: picture,
+        password: null, // No password for Google users
+        isEmailVerified: true, // Google emails are verified
+        authProvider: "google",
+      });
+
+      await user.save();
+
+      logger.info("Registo Google realizado", {
+        details: { email: user.email, method: "google" },
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        userId: user._id,
+        isPremium: user.isPremium,
+        isAdmin: user.isAdmin,
+        email: user.email,
+        authProvider: user.authProvider || "google",
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.name,
+        picture: user.picture,
+        isPremium: user.isPremium,
+        isAdmin: user.isAdmin,
+        authProvider: user.authProvider || "google",
+      },
+      message: "Autenticação Google bem-sucedida",
+    });
+  } catch (error) {
+    console.error("Erro na autenticação Google:", error);
+    res.status(500).json({ message: "Erro interno do servidor" });
+  }
+});
+
+// Add this middleware to handle users without passwords
+const authenticateGoogleUser = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) return res.status(401).json({ message: "Token não fornecido" });
+
+  jwt.verify(token, JWT_SECRET, async (err, decoded) => {
+    if (err) return res.status(403).json({ message: "Token inválido" });
+
+    // For Google users, we might need additional validation
+    if (decoded.authProvider === "google") {
+      // Additional Google-specific validation can be added here
+    }
+
+    req.user = decoded;
+    next();
+  });
+};
 
 // Middleware de logging para desenvolvimento
 app.use((req, res, next) => {
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== "production") {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
     if (req.headers.origin) {
-      console.log('Origin:', req.headers.origin);
+      console.log("Origin:", req.headers.origin);
     }
   }
   next();
@@ -140,82 +298,86 @@ app.use((req, res, next) => {
 // MongoDB Connection otimizada
 const connectDB = async () => {
   if (!process.env.MONGODB_URI) {
-    console.log('⚠️ MONGODB_URI não definida. Executando sem banco de dados.');
+    console.log("⚠️ MONGODB_URI não definida. Executando sem banco de dados.");
     return false;
   }
 
   const maxRetries = 3;
   let retries = 0;
-  
+
   const connectionOptions = {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
     maxPoolSize: 5, // Reduzido para Render
     retryWrites: true,
-    w: 'majority',
+    w: "majority",
     maxIdleTimeMS: 30000,
     bufferCommands: false,
   };
 
   while (retries < maxRetries) {
     try {
-      console.log(`🔄 Tentativa de conexão MongoDB ${retries + 1}/${maxRetries}...`);
-      
+      console.log(
+        `🔄 Tentativa de conexão MongoDB ${retries + 1}/${maxRetries}...`
+      );
+
       await mongoose.connect(process.env.MONGODB_URI, connectionOptions);
       console.log("✅ MongoDB conectado com sucesso!");
-      
+
       // Carregar models após conexão
       initModels();
-      
+
       // Inicializar database
       setTimeout(() => initializeDatabase(), 1000);
-      
+
       return true;
-      
     } catch (error) {
       retries++;
-      console.error(`❌ Erro na conexão MongoDB (tentativa ${retries}/${maxRetries}):`, error.message);
-      
+      console.error(
+        `❌ Erro na conexão MongoDB (tentativa ${retries}/${maxRetries}):`,
+        error.message
+      );
+
       if (retries >= maxRetries) {
         console.error("❌ Máximo de tentativas de conexão excedido");
         console.log("⚠️ Continuando sem MongoDB - modo offline");
         return false;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
   return false;
 };
 
 // Event listeners do MongoDB
-mongoose.connection.on('connected', () => {
-  console.log('📊 MongoDB: Conexão estabelecida');
+mongoose.connection.on("connected", () => {
+  console.log("📊 MongoDB: Conexão estabelecida");
 });
 
-mongoose.connection.on('error', (err) => {
-  console.error('❌ MongoDB: Erro na conexão:', err.message);
+mongoose.connection.on("error", (err) => {
+  console.error("❌ MongoDB: Erro na conexão:", err.message);
 });
 
-mongoose.connection.on('disconnected', () => {
-  console.log('⚠️ MongoDB: Conexão perdida');
+mongoose.connection.on("disconnected", () => {
+  console.log("⚠️ MongoDB: Conexão perdida");
 });
 
-mongoose.connection.on('reconnected', () => {
-  console.log('🔄 MongoDB: Reconectado');
+mongoose.connection.on("reconnected", () => {
+  console.log("🔄 MongoDB: Reconectado");
 });
 
 // Health check otimizado
 app.get(["/", "/api/health", "/health"], async (req, res) => {
   try {
     const dbConnected = mongoose.connection.readyState === 1;
-    
+
     let ratesCount = 0;
     if (dbConnected && Rate) {
       try {
         ratesCount = await Rate.countDocuments();
       } catch (error) {
-        console.error('Erro ao contar rates:', error.message);
+        console.error("Erro ao contar rates:", error.message);
       }
     }
 
@@ -223,21 +385,21 @@ app.get(["/", "/api/health", "/health"], async (req, res) => {
       status: "OK",
       timestamp: new Date().toISOString(),
       version: "2.0.0",
-      environment: process.env.NODE_ENV || 'development',
+      environment: process.env.NODE_ENV || "development",
       port: PORT,
       database: {
         connected: dbConnected,
-        status: dbConnected ? 'connected' : 'disconnected'
+        status: dbConnected ? "connected" : "disconnected",
       },
       uptime: Math.floor(process.uptime()),
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
       },
       data: {
         ratesCount,
-        hasData: ratesCount > 0
-      }
+        hasData: ratesCount > 0,
+      },
     };
 
     res.status(200).json(health);
@@ -247,7 +409,7 @@ app.get(["/", "/api/health", "/health"], async (req, res) => {
       status: "OK",
       error: "Health check com avisos",
       timestamp: new Date().toISOString(),
-      uptime: Math.floor(process.uptime())
+      uptime: Math.floor(process.uptime()),
     });
   }
 });
@@ -381,13 +543,13 @@ const validatePremiumStatus = async (req, res, next) => {
       );
 
       // Enviar novo token no header da resposta
-      res.setHeader('X-Updated-Token', newToken);
-      
+      res.setHeader("X-Updated-Token", newToken);
+
       // Atualizar req.user para a requisição atual
       req.user = {
         ...req.user,
         isPremium: currentUser.isPremium,
-        isAdmin: currentUser.isAdmin
+        isAdmin: currentUser.isAdmin,
       };
     }
 
@@ -456,13 +618,17 @@ const validateEmail = (email) => {
 app.post("/api/auth/register", async (req, res) => {
   try {
     if (!User) {
-      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
+      return res
+        .status(503)
+        .json({ message: "Serviço temporariamente indisponível" });
     }
 
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ message: "Email e senha são obrigatórios" });
+      return res
+        .status(400)
+        .json({ message: "Email e senha são obrigatórios" });
     }
 
     if (!validateEmail(email)) {
@@ -470,7 +636,9 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     if (password.length < 8) {
-      return res.status(400).json({ message: "Senha deve ter pelo menos 8 caracteres" });
+      return res
+        .status(400)
+        .json({ message: "Senha deve ter pelo menos 8 caracteres" });
     }
 
     const existingUser = await User.findOne({ email });
@@ -492,13 +660,17 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   try {
     if (!User) {
-      return res.status(503).json({ message: "Serviço temporariamente indisponível" });
+      return res
+        .status(503)
+        .json({ message: "Serviço temporariamente indisponível" });
     }
 
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ message: "Email e senha são obrigatórios" });
+      return res
+        .status(400)
+        .json({ message: "Email e senha são obrigatórios" });
     }
 
     const user = await User.findOne({ email });
@@ -568,7 +740,7 @@ app.post("/api/auth/validate", authenticateToken, async (req, res) => {
         isPremium: currentUser.isPremium,
         isAdmin: currentUser.isAdmin,
       },
-      message: "Sessão validada com sucesso"
+      message: "Sessão validada com sucesso",
     });
   } catch (error) {
     console.error("Erro na validação:", error);
@@ -586,7 +758,7 @@ app.get("/api/rates", validatePremiumStatus, async (req, res) => {
     if (token) {
       try {
         const user = jwt.verify(token, JWT_SECRET);
-        
+
         // VALIDAÇÃO DUPLA: Verificar na base de dados também
         if (User && mongoose.connection.readyState === 1) {
           const dbUser = await User.findById(user.userId);
@@ -594,16 +766,15 @@ app.get("/api/rates", validatePremiumStatus, async (req, res) => {
         } else {
           isPremium = user.isPremium || false;
         }
-        
       } catch (err) {
         isPremium = false;
       }
     }
 
     const limit = isPremium ? 30 : 7;
-    
+
     let rates;
-    if (ratesCache.data && (Date.now() - ratesCache.timestamp) < 60000) {
+    if (ratesCache.data && Date.now() - ratesCache.timestamp < 60000) {
       rates = ratesCache.data.slice(0, limit);
     } else {
       if (Rate && mongoose.connection.readyState === 1) {
@@ -611,7 +782,7 @@ app.get("/api/rates", validatePremiumStatus, async (req, res) => {
       } else {
         rates = generateRatesData().slice(0, limit);
       }
-      
+
       ratesCache.data = rates;
       ratesCache.timestamp = Date.now();
     }
@@ -668,7 +839,9 @@ app.post("/api/user/phone", authenticateToken, async (req, res) => {
     const { phoneNumber } = req.body;
 
     if (!phoneNumber) {
-      return res.status(400).json({ message: "Número de telefone é obrigatório" });
+      return res
+        .status(400)
+        .json({ message: "Número de telefone é obrigatório" });
     }
 
     const user = await User.findById(req.user.userId);
@@ -687,8 +860,9 @@ app.post("/api/user/phone", authenticateToken, async (req, res) => {
 });
 
 // === ROTAS DE ALERTAS ===
-app.post("/api/alerts", 
-  authenticateToken, 
+app.post(
+  "/api/alerts",
+  authenticateToken,
   createUserRateLimit,
   validateRequestBody({
     currency: { required: true, type: "string" },
@@ -707,7 +881,8 @@ app.post("/api/alerts",
 
         if (alertCount >= 1) {
           return res.status(403).json({
-            message: "Utilizadores básicos podem ter apenas 1 alerta ativo. Upgrade para Premium para alertas ilimitados.",
+            message:
+              "Utilizadores básicos podem ter apenas 1 alerta ativo. Upgrade para Premium para alertas ilimitados.",
           });
         }
       }
@@ -764,225 +939,328 @@ app.delete("/api/alerts/:id", authenticateToken, async (req, res) => {
 });
 
 // === SIMULADOR DE CÂMBIO ===
-app.post("/api/simulate", authenticateToken, createUserRateLimit, async (req, res) => {
-  try {
-    const { amount, fromCurrency, toCurrency, bank = "bna" } = req.body;
+app.post(
+  "/api/simulate",
+  authenticateToken,
+  createUserRateLimit,
+  async (req, res) => {
+    try {
+      const { amount, fromCurrency, toCurrency, bank = "bna" } = req.body;
 
-    if (!amount || !fromCurrency || !toCurrency) {
-      return res.status(400).json({ message: "Dados incompletos para simulação" });
+      if (!amount || !fromCurrency || !toCurrency) {
+        return res
+          .status(400)
+          .json({ message: "Dados incompletos para simulação" });
+      }
+
+      let latestRates;
+      if (Rate && mongoose.connection.readyState === 1) {
+        latestRates = await Rate.findOne().sort({ date: -1 });
+      }
+
+      if (!latestRates) {
+        const fallbackRates = generateRatesData()[0];
+        latestRates = fallbackRates;
+      }
+
+      const bankFees = {
+        bna: 0.5,
+        bic: 1.2,
+        bai: 1.0,
+        standard: 1.5,
+        millennium: 1.3,
+      };
+
+      const fee = bankFees[bank] || 1.0;
+      const rate = latestRates[`${fromCurrency}Sell`] || 1;
+
+      const baseAmount = amount * rate;
+      const feeAmount = baseAmount * (fee / 100);
+      const finalAmount = baseAmount - feeAmount;
+
+      res.json({
+        amount: parseFloat(amount),
+        fromCurrency: fromCurrency.toUpperCase(),
+        toCurrency: toCurrency.toUpperCase(),
+        rate,
+        baseAmount,
+        feePercentage: fee,
+        feeAmount,
+        finalAmount,
+        bank: bank.toUpperCase(),
+      });
+    } catch (error) {
+      console.error("Erro na simulação:", error);
+      res.status(500).json({ message: "Erro na simulação" });
     }
-
-    let latestRates;
-    if (Rate && mongoose.connection.readyState === 1) {
-      latestRates = await Rate.findOne().sort({ date: -1 });
-    }
-    
-    if (!latestRates) {
-      const fallbackRates = generateRatesData()[0];
-      latestRates = fallbackRates;
-    }
-
-    const bankFees = {
-      bna: 0.5,
-      bic: 1.2,
-      bai: 1.0,
-      standard: 1.5,
-      millennium: 1.3,
-    };
-
-    const fee = bankFees[bank] || 1.0;
-    const rate = latestRates[`${fromCurrency}Sell`] || 1;
-
-    const baseAmount = amount * rate;
-    const feeAmount = baseAmount * (fee / 100);
-    const finalAmount = baseAmount - feeAmount;
-
-    res.json({
-      amount: parseFloat(amount),
-      fromCurrency: fromCurrency.toUpperCase(),
-      toCurrency: toCurrency.toUpperCase(),
-      rate,
-      baseAmount,
-      feePercentage: fee,
-      feeAmount,
-      finalAmount,
-      bank: bank.toUpperCase(),
-    });
-  } catch (error) {
-    console.error("Erro na simulação:", error);
-    res.status(500).json({ message: "Erro na simulação" });
   }
-});
+);
 
 // === ROTA DE EXPORTAÇÃO DE DADOS ===
-app.post("/api/export-rates", authenticateToken, validatePremiumStatus, async (req, res) => {
-  try {
-    if (!req.user.isPremium && !req.user.isAdmin) {
-      return res.status(403).json({ message: "Funcionalidade exclusiva para usuários Premium." });
-    }
+app.post(
+  "/api/export-rates",
+  authenticateToken,
+  validatePremiumStatus,
+  async (req, res) => {
+    try {
+      if (!req.user.isPremium && !req.user.isAdmin) {
+        return res
+          .status(403)
+          .json({ message: "Funcionalidade exclusiva para usuários Premium." });
+      }
 
-    const rates = await Rate.find().sort({ date: 1 });
-    if (!rates || rates.length === 0) {
-      return res.status(404).json({ message: "Nenhum dado de taxas para exportar." });
-    }
+      const rates = await Rate.find().sort({ date: 1 });
+      if (!rates || rates.length === 0) {
+        return res
+          .status(404)
+          .json({ message: "Nenhum dado de taxas para exportar." });
+      }
 
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("Taxas de Câmbio");
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Taxas de Câmbio");
 
-    worksheet.columns = [
-      { header: "Data", key: "date", width: 15 },
-      { header: "USD Compra", key: "usdBuy", width: 15 },
-      { header: "USD Venda", key: "usdSell", width: 15 },
-      { header: "EUR Compra", key: "eurBuy", width: 15 },
-      { header: "EUR Venda", key: "eurSell", width: 15 },
-      { header: "ZAR Compra", key: "zarBuy", width: 15 },
-      { header: "ZAR Venda", key: "zarSell", width: 15 },
-      { header: "CAD Compra", key: "cadBuy", width: 15 },
-      { header: "CAD Venda", key: "cadSell", width: 15 },
-    ];
+      worksheet.columns = [
+        { header: "Data", key: "date", width: 15 },
+        { header: "USD Compra", key: "usdBuy", width: 15 },
+        { header: "USD Venda", key: "usdSell", width: 15 },
+        { header: "EUR Compra", key: "eurBuy", width: 15 },
+        { header: "EUR Venda", key: "eurSell", width: 15 },
+        { header: "ZAR Compra", key: "zarBuy", width: 15 },
+        { header: "ZAR Venda", key: "zarSell", width: 15 },
+        { header: "CAD Compra", key: "cadBuy", width: 15 },
+        { header: "CAD Venda", key: "cadSell", width: 15 },
+      ];
 
-    rates.forEach((rate) => {
-      worksheet.addRow({
-        date: rate.date.toLocaleDateString("pt-AO"),
-        usdBuy: rate.usdBuy,
-        usdSell: rate.usdSell,
-        eurBuy: rate.eurBuy,
-        eurSell: rate.eurSell,
-        zarBuy: rate.zarBuy,
-        zarSell: rate.zarSell,
-        cadBuy: rate.cadBuy,
-        cadSell: rate.cadSell,
+      rates.forEach((rate) => {
+        worksheet.addRow({
+          date: rate.date.toLocaleDateString("pt-AO"),
+          usdBuy: rate.usdBuy,
+          usdSell: rate.usdSell,
+          eurBuy: rate.eurBuy,
+          eurSell: rate.eurSell,
+          zarBuy: rate.zarBuy,
+          zarSell: rate.zarSell,
+          cadBuy: rate.cadBuy,
+          cadSell: rate.cadSell,
+        });
       });
-    });
 
-    // Estilizar o cabeçalho
-    worksheet.getRow(1).eachCell((cell) => {
-      cell.font = { bold: true };
-      cell.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "FFE6E6FA" },
-      };
-    });
+      // Estilizar o cabeçalho
+      worksheet.getRow(1).eachCell((cell) => {
+        cell.font = { bold: true };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFE6E6FA" },
+        };
+      });
 
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename=taxas-cambio-${new Date().toISOString().split('T')[0]}.xlsx`);
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=taxas-cambio-${
+          new Date().toISOString().split("T")[0]
+        }.xlsx`
+      );
 
-    await workbook.xlsx.write(res);
-    res.end();
-
-  } catch (error) {
-    console.error("Erro na exportação:", error);
-    res.status(500).json({ message: "Erro ao exportar dados" });
+      await workbook.xlsx.write(res);
+      res.end();
+    } catch (error) {
+      console.error("Erro na exportação:", error);
+      res.status(500).json({ message: "Erro ao exportar dados" });
+    }
   }
-});
+);
 
 // === ROTAS ADMINISTRATIVAS ===
-app.post("/api/admin/rates", authenticateToken, authenticateAdmin, async (req, res) => {
-  try {
-    const { usdBuy, usdSell, eurBuy, eurSell, zarBuy, zarSell, cadBuy, cadSell } = req.body;
+app.post(
+  "/api/admin/rates",
+  authenticateToken,
+  authenticateAdmin,
+  async (req, res) => {
+    try {
+      const {
+        usdBuy,
+        usdSell,
+        eurBuy,
+        eurSell,
+        zarBuy,
+        zarSell,
+        cadBuy,
+        cadSell,
+      } = req.body;
 
-    if (!usdBuy || !usdSell || !eurBuy || !eurSell || !zarBuy || !zarSell || !cadBuy || !cadSell) {
-      return res.status(400).json({ message: "Todos os campos de taxas são obrigatórios" });
-    }
-
-    const newRate = new Rate({
-      date: new Date(),
-      usdBuy: parseFloat(usdBuy),
-      usdSell: parseFloat(usdSell),
-      eurBuy: parseFloat(eurBuy),
-      eurSell: parseFloat(eurSell),
-      zarBuy: parseFloat(zarBuy),
-      zarSell: parseFloat(zarSell),
-      cadBuy: parseFloat(cadBuy),
-      cadSell: parseFloat(cadSell),
-      source: "Admin",
-      confidence: "high",
-    });
-
-    await newRate.save();
-
-    // Limpar cache
-    ratesCache.data = null;
-    ratesCache.timestamp = 0;
-
-    res.status(201).json({
-      message: "Taxa adicionada com sucesso!",
-      rate: newRate,
-    });
-  } catch (error) {
-    console.error("Erro ao adicionar taxa:", error);
-    res.status(500).json({ message: "Erro ao adicionar taxa" });
-  }
-});
-
-app.get("/api/admin/users", authenticateToken, authenticateAdmin, async (req, res) => {
-  try {
-    const users = await User.find({}, "-password").sort({ createdAt: -1 });
-    
-    const userStats = await User.aggregate([
-      {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          premium: { $sum: { $cond: ["$isPremium", 1, 0] } },
-          basic: { $sum: { $cond: ["$isPremium", 0, 1] } },
-          admins: { $sum: { $cond: ["$isAdmin", 1, 0] } }
-        }
+      if (
+        !usdBuy ||
+        !usdSell ||
+        !eurBuy ||
+        !eurSell ||
+        !zarBuy ||
+        !zarSell ||
+        !cadBuy ||
+        !cadSell
+      ) {
+        return res
+          .status(400)
+          .json({ message: "Todos os campos de taxas são obrigatórios" });
       }
-    ]);
 
-    res.json({
-      users,
-      stats: userStats[0] || { total: 0, premium: 0, basic: 0, admins: 0 }
-    });
-  } catch (error) {
-    console.error("Erro ao buscar usuários:", error);
-    res.status(500).json({ message: "Erro ao buscar usuários" });
-  }
-});
+      const newRate = new Rate({
+        date: new Date(),
+        usdBuy: parseFloat(usdBuy),
+        usdSell: parseFloat(usdSell),
+        eurBuy: parseFloat(eurBuy),
+        eurSell: parseFloat(eurSell),
+        zarBuy: parseFloat(zarBuy),
+        zarSell: parseFloat(zarSell),
+        cadBuy: parseFloat(cadBuy),
+        cadSell: parseFloat(cadSell),
+        source: "Admin",
+        confidence: "high",
+      });
 
-app.patch("/api/admin/users/:id/premium", authenticateToken, authenticateAdmin, async (req, res) => {
-  try {
-    const { isPremium } = req.body;
-    
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { isPremium: Boolean(isPremium) },
-      { new: true }
-    );
+      await newRate.save();
 
-    if (!user) {
-      return res.status(404).json({ message: "Utilizador não encontrado" });
+      // Limpar cache
+      ratesCache.data = null;
+      ratesCache.timestamp = 0;
+
+      res.status(201).json({
+        message: "Taxa adicionada com sucesso!",
+        rate: newRate,
+      });
+    } catch (error) {
+      console.error("Erro ao adicionar taxa:", error);
+      res.status(500).json({ message: "Erro ao adicionar taxa" });
     }
+  }
+);
 
-    res.json({
-      message: `Status Premium ${isPremium ? 'ativado' : 'desativado'} com sucesso!`,
-      user: {
-        id: user._id,
-        email: user.email,
-        isPremium: user.isPremium,
-        isAdmin: user.isAdmin
+app.get(
+  "/api/admin/users",
+  authenticateToken,
+  authenticateAdmin,
+  async (req, res) => {
+    try {
+      const users = await User.find({}, "-password").sort({ createdAt: -1 });
+
+      const userStats = await User.aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            premium: { $sum: { $cond: ["$isPremium", 1, 0] } },
+            basic: { $sum: { $cond: ["$isPremium", 0, 1] } },
+            admins: { $sum: { $cond: ["$isAdmin", 1, 0] } },
+          },
+        },
+      ]);
+
+      res.json({
+        users,
+        stats: userStats[0] || { total: 0, premium: 0, basic: 0, admins: 0 },
+      });
+    } catch (error) {
+      console.error("Erro ao buscar usuários:", error);
+      res.status(500).json({ message: "Erro ao buscar usuários" });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/users/:id/premium",
+  authenticateToken,
+  authenticateAdmin,
+  async (req, res) => {
+    try {
+      const { isPremium } = req.body;
+
+      const user = await User.findByIdAndUpdate(
+        req.params.id,
+        { isPremium: Boolean(isPremium) },
+        { new: true }
+      );
+
+      if (!user) {
+        return res.status(404).json({ message: "Utilizador não encontrado" });
       }
-    });
-  } catch (error) {
-    console.error("Erro ao atualizar status premium:", error);
-    res.status(500).json({ message: "Erro ao atualizar status premium" });
-  }
-});
 
-app.get("/api/admin/alerts", authenticateToken, authenticateAdmin, async (req, res) => {
-  try {
-    const alerts = await Alert.find({})
-      .populate('userId', 'email')
-      .sort({ dateCreated: -1 });
-    
-    res.json(alerts);
-  } catch (error) {
-    console.error("Erro ao buscar alertas:", error);
-    res.status(500).json({ message: "Erro ao buscar alertas" });
+      res.json({
+        message: `Status Premium ${
+          isPremium ? "ativado" : "desativado"
+        } com sucesso!`,
+        user: {
+          id: user._id,
+          email: user.email,
+          isPremium: user.isPremium,
+          isAdmin: user.isAdmin,
+        },
+      });
+    } catch (error) {
+      console.error("Erro ao atualizar status premium:", error);
+      res.status(500).json({ message: "Erro ao atualizar status premium" });
+    }
   }
-});
+);
+
+app.get(
+  "/api/admin/alerts",
+  authenticateToken,
+  authenticateAdmin,
+  async (req, res) => {
+    try {
+      const alerts = await Alert.find({})
+        .populate("userId", "email")
+        .sort({ dateCreated: -1 });
+
+      res.json(alerts);
+    } catch (error) {
+      console.error("Erro ao buscar alertas:", error);
+      res.status(500).json({ message: "Erro ao buscar alertas" });
+    }
+  }
+);
+
+// Add this route in server.js after the existing admin routes:
+app.patch(
+  "/api/admin/users/email/:email/premium",
+  authenticateToken,
+  authenticateAdmin,
+  async (req, res) => {
+    try {
+      const { isPremium } = req.body;
+      const email = decodeURIComponent(req.params.email);
+
+      const user = await User.findOneAndUpdate(
+        { email: email },
+        { isPremium: Boolean(isPremium) },
+        { new: true }
+      );
+
+      if (!user) {
+        return res.status(404).json({ message: "Utilizador não encontrado" });
+      }
+
+      res.json({
+        message: `Status Premium ${
+          isPremium ? "ativado" : "desativado"
+        } com sucesso!`,
+        user: {
+          id: user._id,
+          email: user.email,
+          isPremium: user.isPremium,
+          isAdmin: user.isAdmin,
+        },
+      });
+    } catch (error) {
+      console.error("Erro ao atualizar status premium:", error);
+      res.status(500).json({ message: "Erro ao atualizar status premium" });
+    }
+  }
+);
 
 // === SISTEMA DE NOTIFICAÇÕES ===
 const checkAlerts = async () => {
@@ -999,14 +1277,16 @@ const checkAlerts = async () => {
     }
 
     for (const alert of activeAlerts) {
-      const rateField = `${alert.currency}${alert.rateType === 'buy' ? 'Buy' : 'Sell'}`;
+      const rateField = `${alert.currency}${
+        alert.rateType === "buy" ? "Buy" : "Sell"
+      }`;
       const currentRate = latestRate[rateField];
 
       let shouldTrigger = false;
-      
-      if (alert.type === 'above' && currentRate >= alert.value) {
+
+      if (alert.type === "above" && currentRate >= alert.value) {
         shouldTrigger = true;
-      } else if (alert.type === 'below' && currentRate <= alert.value) {
+      } else if (alert.type === "below" && currentRate <= alert.value) {
         shouldTrigger = true;
       }
 
@@ -1017,24 +1297,28 @@ const checkAlerts = async () => {
         await alert.save();
 
         // Aqui você pode implementar envio de email/SMS
-        console.log(`🔔 Alerta disparado para ${alert.currency.toUpperCase()}: ${currentRate} (${alert.type} ${alert.value})`);
+        console.log(
+          `🔔 Alerta disparado para ${alert.currency.toUpperCase()}: ${currentRate} (${
+            alert.type
+          } ${alert.value})`
+        );
       }
     }
   } catch (error) {
-    console.error('Erro ao verificar alertas:', error);
+    console.error("Erro ao verificar alertas:", error);
   }
 };
 
 // Executar verificação de alertas a cada 5 minutos
-cron.schedule('*/5 * * * *', checkAlerts);
+cron.schedule("*/5 * * * *", checkAlerts);
 
 // === MIDDLEWARE DE TRATAMENTO DE ERROS ===
 app.use((err, req, res, next) => {
-  console.error('Erro não tratado:', err);
+  console.error("Erro não tratado:", err);
   res.status(500).json({
-    message: 'Erro interno do servidor',
-    error: process.env.NODE_ENV === 'production' ? {} : err,
-    timestamp: new Date().toISOString()
+    message: "Erro interno do servidor",
+    error: process.env.NODE_ENV === "production" ? {} : err,
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -1063,51 +1347,53 @@ app.use("*", (req, res) => {
       "GET /api/admin/users",
       "PATCH /api/admin/users/:id/premium",
       "GET /api/admin/alerts",
-    ]
+    ],
   });
 });
 
 // Graceful shutdown
 const gracefulShutdown = async (signal) => {
   console.log(`\n🛑 Recebido sinal ${signal}. Encerrando servidor...`);
-  
+
   try {
     if (mongoose.connection.readyState === 1) {
       await mongoose.connection.close();
-      console.log('📴 Conexão MongoDB encerrada');
+      console.log("📴 Conexão MongoDB encerrada");
     }
   } catch (error) {
-    console.error('❌ Erro ao fechar conexão MongoDB:', error);
+    console.error("❌ Erro ao fechar conexão MongoDB:", error);
   }
-  
-  console.log('✅ Encerramento concluído');
+
+  console.log("✅ Encerramento concluído");
   process.exit(0);
 };
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // Função de inicialização do servidor
 const startServer = async () => {
   try {
-    console.log('🚀 Iniciando servidor...');
-    
+    console.log("🚀 Iniciando servidor...");
+
     // Tentar conectar ao MongoDB
     const dbConnected = await connectDB();
-    
+
     if (!dbConnected) {
-      console.log('⚠️ Servidor iniciará sem base de dados (modo offline)');
+      console.log("⚠️ Servidor iniciará sem base de dados (modo offline)");
     }
-    
+
     // Iniciar servidor HTTP
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, "0.0.0.0", () => {
       console.log(`
 🚀 ====================================
    Servidor Cambio Angola iniciado!
 🌐 URL: http://localhost:${PORT}
 📊 Ambiente: ${process.env.NODE_ENV || "development"}
 ⏰ Horário: ${new Date().toLocaleString("pt-PT")}
-📊 MongoDB: ${mongoose.connection.readyState === 1 ? 'Conectado' : 'Desconectado'}
+📊 MongoDB: ${
+        mongoose.connection.readyState === 1 ? "Conectado" : "Desconectado"
+      }
 📋 Funcionalidades ativas:
    - Autenticação JWT
    - Sistema de Alertas
@@ -1123,10 +1409,10 @@ const startServer = async () => {
     // Configurar timeouts para Render
     server.keepAliveTimeout = 120000;
     server.headersTimeout = 120000;
-    
-    server.on('error', (error) => {
-      console.error('❌ Erro no servidor:', error);
-      if (error.code === 'EADDRINUSE') {
+
+    server.on("error", (error) => {
+      console.error("❌ Erro no servidor:", error);
+      if (error.code === "EADDRINUSE") {
         console.error(`❌ Porta ${PORT} já está em uso`);
         process.exit(1);
       }
@@ -1134,11 +1420,12 @@ const startServer = async () => {
 
     // Iniciar verificação de alertas se estiver conectado
     if (dbConnected) {
-      console.log('🔔 Sistema de alertas ativado - verificações a cada 5 minutos');
+      console.log(
+        "🔔 Sistema de alertas ativado - verificações a cada 5 minutos"
+      );
     }
-
   } catch (error) {
-    console.error('❌ Falha ao iniciar servidor:', error);
+    console.error("❌ Falha ao iniciar servidor:", error);
     process.exit(1);
   }
 };
@@ -1146,7 +1433,7 @@ const startServer = async () => {
 // Iniciar servidor
 if (require.main === module) {
   startServer().catch((error) => {
-    console.error('❌ Erro fatal:', error);
+    console.error("❌ Erro fatal:", error);
     process.exit(1);
   });
 }
