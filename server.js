@@ -13,6 +13,14 @@ const ExcelJS = require("exceljs");
 const { OAuth2Client } = require("google-auth-library");
 require("dotenv").config();
 
+// Após as importações, adicione:
+const logger = {
+  info: (message, meta) => console.log(`ℹ️  ${message}`, meta?.details || ''),
+  error: (message, meta) => console.error(`❌ ${message}`, meta?.details || ''),
+  warn: (message, meta) => console.warn(`⚠️  ${message}`, meta?.details || ''),
+  debug: (message, meta) => console.log(`🔍 ${message}`, meta?.details || '')
+};
+
 // Validação de variáveis de ambiente
 const requiredEnvVars = ["MONGODB_URI", "JWT_SECRET"];
 const missingEnvVars = requiredEnvVars.filter(
