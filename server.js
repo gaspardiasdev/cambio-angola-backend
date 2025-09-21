@@ -117,7 +117,7 @@ const corsOptions = {
       "https://seu-frontend.vercel.app",
       "http://localhost:3000",
       "http://localhost:5173",
-      "http://192.168.51.7:3000",
+      "http://192.168.70.7:5173",
     ].filter(Boolean);
 
     // Permitir requests sem origin (health checks, etc)
