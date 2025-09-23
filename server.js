@@ -113,8 +113,7 @@ const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       process.env.FRONTEND_URL,
-      "https://seu-frontend.netlify.app",
-      "https://seu-frontend.vercel.app",
+      "https://cambio-angola.vercel.app/",
       "http://localhost:3000",
       "http://localhost:5173",
       "http://192.168.221.7:5173",
