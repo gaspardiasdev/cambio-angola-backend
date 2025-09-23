@@ -108,29 +108,54 @@ const createUserRateLimit = rateLimit({
   message: { error: "Muitas requisições. Tente novamente em 1 minuto." },
 });
 
-// CORS Configuration otimizada
+// Normalizar origin (remove trailing slash)
+const normalizeOrigin = (u) => {
+  try {
+    if (!u) return u;
+    return u.replace(/\/+$/, ""); // remove trailing slashes
+  } catch {
+    return u;
+  }
+};
+
+const allowedOrigins = [
+  normalizeOrigin(process.env.FRONTEND_URL),           // ex: https://cambio-angola.vercel.app
+  "https://cambio-angola.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:4040",
+  "http://192.168.221.7:5173",
+].filter(Boolean).map(normalizeOrigin);
+
+// CORS - estrito em produção, permissivo em dev (com logs)
 const corsOptions = {
   origin: function (origin, callback) {
-    const allowedOrigins = [
-      process.env.FRONTEND_URL,
-      "https://cambio-angola.vercel.app/",
-      "http://localhost:3000",
-      "http://localhost:5173",
-      "http://192.168.221.7:5173",
-    ].filter(Boolean);
-
-    // Permitir requests sem origin (health checks, etc)
-    if (!origin) return callback(null, true);
-
-    // Em produção, ser mais permissivo para evitar falhas de deployment
-    if (process.env.NODE_ENV === "production") {
+    // Permitir requisições sem origin (Postman, health checks, mobile webviews sem origin)
+    if (!origin) {
+      logger.debug("CORS: request sem origin - permitido");
       return callback(null, true);
     }
 
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
+    const normalized = normalizeOrigin(origin);
+    logger.debug("CORS: Origin recebida", { details: normalized });
+
+    // Em produção aceite só as allowedOrigins
+    if (process.env.NODE_ENV === "production") {
+      if (allowedOrigins.includes(normalized)) {
+        return callback(null, true);
+      } else {
+        logger.warn("CORS: origin não autorizada", { details: normalized });
+        return callback(new Error("Origin não autorizada by CORS"), false);
+      }
+    }
+
+    // Em dev: aceitar origins listadas; se não listada, permitir mas avisar
+    if (allowedOrigins.includes(normalized)) {
+      return callback(null, true);
     } else {
-      callback(null, true); // Permitir em desenvolvimento
+      logger.warn("CORS DEV: origin não listada mas permitida temporariamente", { details: normalized });
+      return callback(null, true);
     }
   },
   credentials: true,
@@ -148,6 +173,13 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
+
+if (!process.env.GOOGLE_CLIENT_ID) {
+  console.warn("⚠️ GOOGLE_CLIENT_ID não definido! Google Sign-in não funcionará.");
+} else {
+  console.log("✅ GOOGLE_CLIENT_ID carregado");
+}
+
 
 // Initialize Google OAuth client
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -170,7 +202,10 @@ const verifyGoogleToken = async (token) => {
 // === GOOGLE OAUTH ROUTE ===
 // Add this route to your existing routes section
 app.post("/api/auth/google", async (req, res) => {
-  try {
+    try {
+    logger.info("POST /api/auth/google chamada", { details: { origin: req.headers.origin }});
+    logger.debug("Body recebido em /api/auth/google", { details: req.body });
+
     if (!User) {
       return res
         .status(503)
@@ -180,6 +215,7 @@ app.post("/api/auth/google", async (req, res) => {
     const { credential, userInfo } = req.body;
 
     if (!credential) {
+      logger.warn("/api/auth/google sem credential", { details: { origin: req.headers.origin }});
       return res.status(400).json({ message: "Token do Google é obrigatório" });
     }
 
