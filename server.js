@@ -199,6 +199,14 @@ const verifyGoogleToken = async (token) => {
   }
 };
 
+// Permitir que popups comuniquem com opener (resolve postMessage bloqueado)
+app.use((req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  // Se tiveres COEP definido como 'require-corp' globalmente, considera removê-lo ou limitar a rotas específicas
+  next();
+});
+
+
 // === GOOGLE OAUTH ROUTE ===
 // Add this route to your existing routes section
 app.post("/api/auth/google", async (req, res) => {
