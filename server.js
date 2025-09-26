@@ -68,7 +68,18 @@ const PORT = process.env.PORT || 5000;
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "https://accounts.google.com", "https://apis.google.com"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        connectSrc: ["'self'", "https://accounts.google.com"],
+        frameSrc: ["https://accounts.google.com"],
+      },
+    },
+    crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+    crossOriginEmbedderPolicy: false,
   })
 );
 
@@ -199,12 +210,17 @@ const verifyGoogleToken = async (token) => {
   }
 };
 
-// Permitir que popups comuniquem com opener (resolve postMessage bloqueado)
 app.use((req, res, next) => {
-  res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
-  // Se tiveres COEP definido como 'require-corp' globalmente, considera removê-lo ou limitar a rotas específicas
+  // Para Google OAuth, precisamos de políticas específicas
+  if (req.path.includes('/auth/google') || req.headers.referer?.includes('accounts.google.com')) {
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+    res.setHeader("Cross-Origin-Embedder-Policy", "unsafe-none");
+  } else {
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  }
   next();
 });
+
 
 
 // === GOOGLE OAUTH ROUTE ===
