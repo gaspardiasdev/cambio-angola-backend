@@ -139,10 +139,10 @@ const allowedOrigins = [
   "http://192.168.221.7:5173",
 ].filter(Boolean).map(normalizeOrigin);
 
+
 // CORS - estrito em produção, permissivo em dev (com logs)
 const corsOptions = {
   origin: function (origin, callback) {
-    // Permitir requisições sem origin (Postman, health checks, mobile webviews sem origin)
     if (!origin) {
       logger.debug("CORS: request sem origin - permitido");
       return callback(null, true);
@@ -151,7 +151,6 @@ const corsOptions = {
     const normalized = normalizeOrigin(origin);
     logger.debug("CORS: Origin recebida", { details: normalized });
 
-    // Em produção aceite só as allowedOrigins
     if (process.env.NODE_ENV === "production") {
       if (allowedOrigins.includes(normalized)) {
         return callback(null, true);
@@ -161,7 +160,6 @@ const corsOptions = {
       }
     }
 
-    // Em dev: aceitar origins listadas; se não listada, permitir mas avisar
     if (allowedOrigins.includes(normalized)) {
       return callback(null, true);
     } else {
@@ -171,15 +169,21 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  // ADICIONADO: incluir cache-control e outros headers comuns
   allowedHeaders: [
     "Content-Type",
     "Authorization",
     "X-Requested-With",
     "Accept",
     "Origin",
+    "Cache-Control",
+    "X-Forwarded-For",
+    "X-CSRF-Token",
   ],
   exposedHeaders: ["X-Updated-Token"],
+  preflightContinue: false,
 };
+
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
